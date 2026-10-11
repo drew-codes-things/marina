@@ -20,7 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError
 from pydantic import BaseModel
 
-from process.asr_func.asr_push_to_talk import build_model, transcribe_file
+from process.asr_func.asr_push_to_talk import build_model, transcribe_audio, transcribe_file
+from process.asr_func.listen import Ear, wake_match
 from process.asr_func.recorder import Recorder
 from process.asr_func.vad import VAD
 from process.config import CONFIG_PATH, load_config
@@ -400,6 +401,150 @@ def voice_stream(audio: UploadFile = File(...)):
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(audio.file.read())
     return _stream_transcript(Path(tmp.name))
+
+
+_listen_cfg = config.get("listen") or {}
+LISTEN_SECONDS = float(_listen_cfg.get("max_seconds", 10))
+PAUSE_MS = int(_listen_cfg.get("pause_ms", 900))
+
+_wake_cfg = config.get("wake") or {}
+WAKE_WORDS = [str(w) for w in (_wake_cfg.get("words") or ["marina"])]
+WAKE_WAIT = float(_wake_cfg.get("listen_seconds", LISTEN_SECONDS))
+# Whisper writes names it hasn't been told about however it likes.
+WAKE_PROMPT = ", ".join(w.capitalize() for w in WAKE_WORDS[:1]) + "."
+
+_ears = {"button": None}
+
+
+def _reply_to(transcript):
+    """The tail every voice path shares once it knows what was said."""
+    print(f"[you] {transcript}", flush=True)
+    idle.note_interaction()
+    yield _ndjson({"type": "transcript", "text": transcript})
+    yield from _stream_reply(transcript, True, transcript=transcript)
+
+
+def _auto_stream(max_seconds):
+    try:
+        ear = Ear(max_seconds=max_seconds, pause_ms=PAUSE_MS).open()
+    except Exception as e:
+        yield _ndjson({"type": "error", "message": f"Can't open the microphone: {e}"})
+        return
+    _ears["button"] = ear
+    audio = None
+    try:
+        yield _ndjson({"type": "armed", "max_seconds": max_seconds})
+        while audio is None:
+            try:
+                event = ear.events.get(timeout=0.25)
+            except queue.Empty:
+                yield _ndjson({"type": "waiting"})
+                continue
+            if event[0] == "start":
+                yield _ndjson({"type": "speech"})
+            elif event[0] == "silence":
+                yield _ndjson({"type": "cancelled", "message": "Didn't hear anything."})
+                return
+            elif event[0] == "phrase":
+                audio = event[1]
+    finally:
+        ear.close()
+        if _ears["button"] is ear:
+            _ears["button"] = None
+
+    yield _ndjson({"type": "transcribing"})
+    transcript = transcribe_audio(whisper(), audio)
+    if not transcript:
+        yield _ndjson({"type": "cancelled", "message": "Didn't catch that."})
+        return
+    yield from _reply_to(transcript)
+
+
+@app.get("/listen/auto")
+def listen_auto(max_seconds: float = 0):
+    """Listen from now until you pause, `listen.max_seconds` is up, or
+    /listen/finish, then reply. For the mic button."""
+    threading.Thread(target=whisper, daemon=True).start()
+    limit = min(max_seconds or LISTEN_SECONDS, 60.0)
+    return StreamingResponse(_auto_stream(limit), media_type="application/x-ndjson")
+
+
+@app.post("/listen/finish")
+def listen_finish():
+    ear = _ears["button"]
+    if ear is not None:
+        ear.finish()
+    return {"ok": True, "listening": ear is not None}
+
+
+def _wake_stream(timeout):
+    from process.asr_func.recorder import SAMPLERATE
+
+    vad = VAD(SAMPLERATE,
+              margin_db=float(_wake_cfg.get("margin_db", 10.0)),
+              speech_ms=int(_wake_cfg.get("speech_ms", 200)),
+              silence_ms=int(_wake_cfg.get("silence_ms", 600)))
+    try:
+        ear = Ear(vad, max_seconds=max(WAKE_WAIT, 6.0)).open()
+    except Exception as e:
+        yield _ndjson({"type": "error", "message": f"Can't open the microphone: {e}"})
+        return
+
+    request = None
+    woke_at = None
+    deadline = time.time() + timeout
+    try:
+        yield _ndjson({"type": "armed"})
+        while request is None:
+            now = time.time()
+            if woke_at is None and now > deadline:
+                yield _ndjson({"type": "idle"})
+                return
+            if woke_at is not None and now > woke_at + WAKE_WAIT:
+                print("[wake] nothing after her name", flush=True)
+                yield _ndjson({"type": "cancelled"})
+                return
+            try:
+                event = ear.events.get(timeout=0.25)
+            except queue.Empty:
+                yield _ndjson({"type": "waiting"})
+                continue
+            if event[0] == "start":
+                if woke_at is not None:
+                    yield _ndjson({"type": "speech"})
+                continue
+            if event[0] != "phrase":
+                continue
+            # Only her name or what follows it is ever printed or kept; the
+            # rest of what the mic hears is transcribed and thrown away.
+            text = transcribe_audio(whisper(), event[1], prompt=WAKE_PROMPT)
+            if woke_at is not None:
+                if text:
+                    request = text
+                continue
+            rest = wake_match(text, WAKE_WORDS)
+            if rest is None:
+                continue
+            print("[wake] heard her name", flush=True)
+            if rest:
+                request = rest
+            else:
+                woke_at = time.time()
+                yield _ndjson({"type": "wake", "listen_seconds": WAKE_WAIT})
+    finally:
+        ear.close()
+
+    yield from _reply_to(request)
+
+
+@app.get("/wake/listen")
+def wake_listen(timeout: float = 120.0):
+    """Long poll: listens for her name. Say it with a request ("Marina, what
+    time is it") and she answers; say it alone and she waits
+    `wake.listen_seconds` for the rest."""
+    threading.Thread(target=whisper, daemon=True).start()
+    return StreamingResponse(_wake_stream(min(timeout, 600.0)),
+                             media_type="application/x-ndjson")
 
 
 @app.post("/listen/cancel")

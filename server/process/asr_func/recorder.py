@@ -48,15 +48,17 @@ def _transport(name):
     return _transports[name]
 
 
-def _input_device(sd):
+def _input_device(sd, refresh=True):
     """The input device to open: an index, or None for the system default."""
     # PortAudio lists devices once, when it starts. Ask again so headphones
     # connected since then are seen as they are now, not as a stale entry.
-    try:
-        sd._terminate()
-        sd._initialize()
-    except Exception:
-        pass
+    # That restarts PortAudio, so only when no other stream is open.
+    if refresh:
+        try:
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
     inputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
               if d["max_input_channels"] > 0]
 
@@ -85,6 +87,42 @@ def _input_device(sd):
     return None
 
 
+_open_lock = threading.Lock()
+_open_count = 0
+
+
+def open_input(callback):
+    """Open and start a mono float32 input stream on the right mic. The
+    wake listener and the recorder can overlap, so this keeps count."""
+    global _open_count
+    import sounddevice as sd
+
+    with _open_lock:
+        stream = sd.InputStream(
+            device=_input_device(sd, refresh=_open_count == 0),
+            samplerate=SAMPLERATE,
+            channels=CHANNELS,
+            dtype="float32",
+            # 30 ms blocks. Left to itself PortAudio calls back a thousand
+            # times a second, and starved of the GIL it drops audio.
+            blocksize=int(SAMPLERATE * 0.03),
+            callback=callback,
+        )
+        stream.start()
+        _open_count += 1
+    return stream
+
+
+def close_input(stream):
+    global _open_count
+    try:
+        stream.stop()
+        stream.close()
+    finally:
+        with _open_lock:
+            _open_count = max(0, _open_count - 1)
+
+
 class Recorder:
     def __init__(self):
         self._lock = threading.Lock()
@@ -106,7 +144,6 @@ class Recorder:
 
     def start(self, vad=None):
         import numpy as np
-        import sounddevice as sd
 
         with self._lock:
             if self._stream is not None:
@@ -127,14 +164,7 @@ class Recorder:
                 if self._vad is not None:
                     self._analyse(block.reshape(-1))
 
-            self._stream = sd.InputStream(
-                device=_input_device(sd),
-                samplerate=SAMPLERATE,
-                channels=CHANNELS,
-                dtype="float32",
-                callback=callback,
-            )
-            self._stream.start()
+            self._stream = open_input(callback)
             return True
 
     def _analyse(self, mono):
@@ -161,8 +191,7 @@ class Recorder:
             if self._stream is None:
                 return None
 
-            self._stream.stop()
-            self._stream.close()
+            close_input(self._stream)
             self._stream = None
 
             chunks = []

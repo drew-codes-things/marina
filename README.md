@@ -81,7 +81,12 @@ Her config, memory and chat history live in
 ## What she can do
 
 - Sit on your desktop in a transparent, always-on-top window
-- Talk to her or type
+- Talk to her or type. The mic stops by itself when you finish talking,
+  or after 10 seconds
+- Say her name to talk to her hands-free: "Marina, what time is it?" Off
+  by default; turn it on with "Listen for Marina" in the menu bar. What the
+  mic hears is transcribed on the Mac and thrown away unless it is said to
+  her
 - Starts speaking before the whole reply has been generated
 - You can cut her off by talking over her
 - Sometimes says something without being asked

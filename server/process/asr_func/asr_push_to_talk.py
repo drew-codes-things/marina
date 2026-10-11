@@ -42,6 +42,16 @@ def transcribe_file(model, path):
     return " ".join(segment.text for segment in segments).strip()
 
 
+def transcribe_audio(model, audio, prompt=None):
+    """Same as transcribe_file, for 16 kHz mono float32 already in memory.
+    `prompt` nudges Whisper towards words it would otherwise mishear, like
+    her name."""
+    if audio is None or len(audio) < 16000 * 0.25:
+        return ""
+    segments, _ = model.transcribe(audio, vad_filter=True, initial_prompt=prompt)
+    return " ".join(segment.text for segment in segments).strip()
+
+
 def record_and_transcribe(model, output_file="recording.wav", samplerate=44100):
     """Terminal push-to-talk. Records until you press ENTER again."""
     import queue

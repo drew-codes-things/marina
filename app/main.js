@@ -263,6 +263,7 @@ function createWindow() {
 }
 
 let openersOn = true;
+let wakeOn = false;
 
 // The personalities the bridge offers, for the menu bar. Fetched when the
 // menu is about to show, since the bridge owns the current choice.
@@ -298,6 +299,15 @@ function buildTray() {
         click: (item) => {
           openersOn = item.checked;
           win?.webContents.send('set-openers', openersOn);
+        },
+      },
+      {
+        label: 'Listen for \u201cMarina\u201d',
+        type: 'checkbox',
+        checked: wakeOn,
+        click: (item) => {
+          wakeOn = item.checked;
+          win?.webContents.send('set-wake', wakeOn);
         },
       },
       { type: 'separator' },
@@ -442,5 +452,6 @@ ipcMain.handle('capture-screen', async () => {
 });
 
 ipcMain.on('openers-changed', (_e, on) => { openersOn = !!on; });
+ipcMain.on('wake-changed', (_e, on) => { wakeOn = !!on; });
 ipcMain.on('quit', () => app.quit());
 ipcMain.on('minimize', () => win?.hide());

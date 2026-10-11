@@ -1403,6 +1403,12 @@ tick();
 let busy = false;
 let recording = false;
 
+// Wake word state, here because setBusy() reads it.
+let wakeOn = false;
+try { wakeOn = localStorage.getItem('marina.wake') === '1'; } catch {}
+let wakePoll = null;
+let wakeLoopRunning = false;
+
 function setStatus(kind, text) {
   // Guests don't need to see model names or file names.
   if (kind === 'ok' && presenting()) text = 'ready';
@@ -1471,7 +1477,8 @@ function setBusy(on, label) {
   btnSend.disabled = on;
   const see = el('btn-see');
   if (see) see.disabled = on;
-  setStatus(on ? 'busy' : 'ok', on ? label : 'ready');
+  if (on) pauseWake();
+  setStatus(on ? 'busy' : 'ok', on ? label : (wakeOn ? 'say \u201cMarina\u201d' : 'ready'));
 }
 
 async function handleResult(result) {
@@ -1735,20 +1742,18 @@ async function webUploadClip() {
   return fetch('/voice/stream', { method: 'POST', body: form });
 }
 
-async function toggleListen() {
+async function toggleListenWeb() {
   if (busy && !recording) return;
 
   if (!recording) {
     try {
-      if (WEB) await webStartRecording();
-      else await post('/listen/start');
+      await webStartRecording();
       recording = true;
       btnMic.classList.add('recording');
       setStatus('busy', 'listening…');
       hideNotice('bridge');
     } catch (e) {
-      if (WEB) showNotice(`Can't use the microphone: ${e.message}`);
-      else bridgeLost();
+      showNotice(`Can't use the microphone: ${e.message}`);
     }
     return;
   }
@@ -1759,11 +1764,7 @@ async function toggleListen() {
   const req = newRequest();
   req.voice = true;
   try {
-    const res = WEB
-      ? await webUploadClip()
-      : await fetch(BRIDGE + '/listen/stop/stream', { method: 'POST' });
-
-    await consumeReply(res, req);
+    await consumeReply(await webUploadClip(), req);
   } catch (e) {
     if (!req.cancelled) showNotice(`Voice failed: ${e.message}`);
   } finally {
@@ -1772,6 +1773,132 @@ async function toggleListen() {
     setBusy(false);
   }
 }
+
+function showListening(on) {
+  recording = on;
+  btnMic.classList.toggle('recording', on);
+  if (on) setStatus('busy', 'listening…');
+}
+
+// Events from /listen/auto and /wake/listen: listening, then what you said,
+// then her reply as it streams. `onWake` runs when she hears her name on
+// its own and is waiting for the rest.
+async function consumeVoice(res, req, onWake) {
+  if (!res.ok) throw new Error(`bridge returned ${res.status}`);
+  for await (const ev of readEvents(res)) {
+    if (req.cancelled) continue;
+    if (ev.type === 'wake') {
+      onWake?.();
+      showListening(true);
+      pushCue('tilt', 0.8);
+    } else if (ev.type === 'speech') {
+      if (recording) setStatus('busy', 'listening…');
+    } else if (ev.type === 'transcribing') {
+      showListening(false);
+      setBusy(true, 'transcribing');
+    } else if (ev.type === 'transcript') {
+      onWake?.();
+      showListening(false);
+      inflight = req;
+      setBusy(true, 'thinking');
+      showHeard(ev.text);
+    } else if (ev.type === 'chunk') {
+      await playChunk(ev, req);
+    } else if (ev.type === 'cancelled') {
+      showListening(false);
+      if (ev.message) setStatus('ok', ev.message);
+    } else if (ev.type === 'error') {
+      showNotice(ev.message, 'bridge');
+    }
+  }
+  if (!req.cancelled && req.chunks) {
+    hideNotice('bridge');
+    await untilSpoken();
+    endUtterance();
+  }
+}
+
+// The mic button and Space: she listens until you stop talking, or for
+// listen.max_seconds at most, then answers. Pressing again ends it early.
+async function toggleListen() {
+  if (WEB) return toggleListenWeb();
+  if (recording) {
+    post('/listen/finish').catch(() => {});
+    return;
+  }
+  if (busy) return;
+
+  pauseWake();
+  showListening(true);
+  hideNotice('bridge');
+  const req = newRequest();
+  req.voice = true;
+  try {
+    await consumeVoice(await fetch(`${BRIDGE}/listen/auto`), req);
+  } catch {
+    if (!req.cancelled) bridgeLost();
+  } finally {
+    showListening(false);
+    disarmBargeIn(req);
+    if (inflight === req) inflight = null;
+    setBusy(false);
+  }
+}
+
+// Wake word. While she is idle the bridge listens for her name; nothing
+// else it hears is kept. Busy, speaking or listening for the button, it
+// stops, so she never hears herself.
+function wakeIdle() {
+  return wakeOn && bridgeReady && !busy && !recording && !playing && utterance.epoch < 0;
+}
+
+function pauseWake(force) {
+  if (wakePoll && (force || !wakePoll.woke)) {
+    try { wakePoll.abort(); } catch {}
+  }
+}
+
+async function listenForName() {
+  const controller = new AbortController();
+  controller.woke = false;
+  wakePoll = controller;
+  const req = { cancelled: false, text: '', chunks: 0, barge: null, voice: true };
+  try {
+    const res = await fetch(`${BRIDGE}/wake/listen?timeout=120`, { signal: controller.signal });
+    await consumeVoice(res, req, () => { controller.woke = true; });
+  } catch {} finally {
+    if (wakePoll === controller) wakePoll = null;
+    if (controller.woke) {
+      showListening(false);
+      disarmBargeIn(req);
+      if (inflight === req) inflight = null;
+      setBusy(false);
+    }
+  }
+}
+
+async function startWakeLoop() {
+  if (WEB || wakeLoopRunning) return;
+  wakeLoopRunning = true;
+  while (wakeOn) {
+    if (wakeIdle()) await listenForName();
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  wakeLoopRunning = false;
+}
+
+function setWake(on) {
+  wakeOn = !!on;
+  try { localStorage.setItem('marina.wake', wakeOn ? '1' : '0'); } catch {}
+  window.marina?.wakeChanged?.(wakeOn);
+  if (wakeOn) startWakeLoop(); else pauseWake(true);
+  if (!busy && !recording) setStatus('ok', wakeOn ? 'say \u201cMarina\u201d' : 'ready');
+}
+
+window.marina?.onSetWake?.((on) => setWake(on));
+window.marina?.wakeChanged?.(wakeOn);
+// After the rest of this file has run, since the loop waits on bridgeReady.
+if (wakeOn) setTimeout(startWakeLoop, 0);
 
 function sendFromInput() {
   const text = input.value;

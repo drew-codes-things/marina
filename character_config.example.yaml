@@ -296,6 +296,21 @@ bridge:
   host: "127.0.0.1"
   port: 8765
 
+# The mic button (and Space) listens until you stop talking, then answers.
+listen:
+  max_seconds: 10    # never listens longer than this
+  pause_ms: 900      # a pause this long after you've spoken ends it
+
+# Wake word. Turn it on from her menu bar icon ("Listen for Marina"). While
+# she is idle, each thing the mic hears is transcribed on this Mac and
+# thrown away unless it starts with her name ("Marina, ...", "Hey Marina")
+# or ends with it ("..., Marina?"). Say the request in the same breath, or
+# her name alone and then the request within listen_seconds.
+wake:
+  words: ["marina", "marena", "mareena"]   # how Whisper might spell her name
+  listen_seconds: 10
+  margin_db: 10      # how far above the room's noise counts as speech
+
 barge_in:
   enabled: true
   margin_db: 8.0
