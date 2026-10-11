@@ -1,16 +1,88 @@
 """Microphone recorder for the bridge.
 
 Pass a VAD to start() to get speech start/end events, used for barge-in.
+
+Which mic: `asr.input_device` names one (any part of its name), or "auto".
+Auto uses the system default unless that is a Bluetooth headset. Opening a
+headset's mic switches it from stereo playback to call mode, which cuts off
+whatever she is saying through it, so auto records with the Mac's own mic
+instead and leaves the headphones alone.
 """
+import json
 import queue
+import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
+
+from process.config import load_config
 
 SAMPLERATE = 16000
 CHANNELS = 1
 
 PREROLL_SECONDS = 0.35
+
+INPUT_DEVICE = str((load_config().get("asr") or {}).get("input_device") or "auto").strip()
+
+_transports = {}
+_announced = {}
+
+
+def _transport(name):
+    """CoreAudio's transport type for a device ("bluetooth", "builtin", ...),
+    remembered by name since asking takes a third of a second."""
+    if sys.platform != "darwin":
+        return ""
+    if name not in _transports:
+        try:
+            out = subprocess.run(["system_profiler", "SPAudioDataType", "-json"],
+                                 capture_output=True, text=True, timeout=5).stdout
+            items = json.loads(out)["SPAudioDataType"][0]["_items"]
+        except Exception:
+            items = []
+        for item in items:
+            kind = item.get("coreaudio_device_transport", "")
+            _transports[item.get("_name", "")] = kind.replace("coreaudio_device_type_", "")
+        _transports.setdefault(name, "")
+    return _transports[name]
+
+
+def _input_device(sd):
+    """The input device to open: an index, or None for the system default."""
+    # PortAudio lists devices once, when it starts. Ask again so headphones
+    # connected since then are seen as they are now, not as a stale entry.
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception:
+        pass
+    inputs = [(i, d["name"]) for i, d in enumerate(sd.query_devices())
+              if d["max_input_channels"] > 0]
+
+    if INPUT_DEVICE.lower() not in ("", "auto", "default"):
+        for i, name in inputs:
+            if INPUT_DEVICE.lower() in name.lower():
+                return i
+        print(f"[mic] no input called {INPUT_DEVICE!r}, using the default", flush=True)
+        return None
+    if INPUT_DEVICE.lower() == "default":
+        return None
+
+    try:
+        default = sd.query_devices(kind="input")["name"]
+    except Exception:
+        return None
+    if _transport(default) != "bluetooth":
+        return None
+    for i, name in inputs:
+        if _transport(name) == "builtin":
+            if _announced.get(default) != name:
+                _announced[default] = name
+                print(f"[mic] {default} is Bluetooth; listening with {name} so "
+                      "her voice doesn't cut out", flush=True)
+            return i
+    return None
 
 
 class Recorder:
@@ -56,6 +128,7 @@ class Recorder:
                     self._analyse(block.reshape(-1))
 
             self._stream = sd.InputStream(
+                device=_input_device(sd),
                 samplerate=SAMPLERATE,
                 channels=CHANNELS,
                 dtype="float32",

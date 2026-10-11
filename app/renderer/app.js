@@ -424,9 +424,27 @@ let freqData = null;
 let timeData = null;
 let mouthOpen = 0;
 
+// Set when an audio device comes or goes. A context whose output moved
+// (headphones in or out) can play silence from then on, so a fresh one is
+// made before her next sentence, never in the middle of one.
+let audioStale = false;
+navigator.mediaDevices?.addEventListener?.('devicechange', () => { audioStale = true; });
+
 function ensureAudio() {
+  if (audioCtx && audioStale && utterance.epoch < 0) {
+    audioStale = false;
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+  }
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = audioCtx;
+    ctx.onstatechange = () => {
+      // macOS suspends or interrupts output when the route changes.
+      if (ctx === audioCtx && (ctx.state === 'suspended' || ctx.state === 'interrupted')) {
+        ctx.resume().catch(() => {});
+      }
+    };
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     analyser.smoothingTimeConstant = 0.35;

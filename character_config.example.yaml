@@ -253,6 +253,10 @@ persona:
 
 asr:
   model: "base.en"
+  # Which mic she listens with: "auto", "default", or part of a device's
+  # name. Auto avoids Bluetooth headsets, whose mic switches them into call
+  # mode and cuts off her voice, and uses the Mac's own mic instead.
+  input_device: auto
   device: "cpu"
   compute_type: "int8"
   offline: true
