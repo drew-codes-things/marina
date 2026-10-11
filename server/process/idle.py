@@ -5,12 +5,11 @@ import threading
 import time
 from datetime import datetime
 
-from process.config import load_config
+from process.config import load_config, setting
 
 _config = load_config()
 _idle = _config.get("idle") or {}
 
-ENABLED = bool(_idle.get("enabled", True))
 MIN_GAP = float(_idle.get("min_gap_minutes", 25)) * 60
 MAX_PER_HOUR = int(_idle.get("max_per_hour", 2))
 PROBABILITY = float(_idle.get("probability", 0.5))
@@ -30,6 +29,11 @@ _lock = threading.Lock()
 _last_interaction = time.time()
 _spoken_at = []
 _muted = False
+
+
+def enabled():
+    """Read on every call: the presentation preset turns openers off."""
+    return bool(setting("idle", "enabled", True))
 
 
 def note_interaction():
@@ -78,7 +82,7 @@ def status():
         recent = _recent_count(now)
         is_muted = _muted
     return {
-        "enabled": ENABLED,
+        "enabled": enabled(),
         "muted": is_muted,
         "quiet_for_seconds": round(quiet_for),
         "spoken_this_hour": recent,
@@ -88,7 +92,7 @@ def status():
 
 
 def due(now=None, roll=None):
-    if not ENABLED:
+    if not enabled():
         return False
     now = now or time.time()
     with _lock:

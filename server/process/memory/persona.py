@@ -4,12 +4,10 @@ import hashlib
 import random
 from datetime import date
 
-from process.config import load_config
+from process.config import load_config, setting
 
 _config = load_config()
 _persona = _config.get("persona") or {}
-
-ENABLED = bool(_persona.get("enabled", True))
 
 DEFAULT_THREADS = [
     "You are four hours into a Jujutsu Kaisen edit and the audio desyncs about "
@@ -49,7 +47,7 @@ MENTION_RATE = float(_persona.get("mention_rate", 0.34))
 
 
 def as_prompt_block(when=None, roll=None):
-    if not ENABLED:
+    if not setting("persona", "enabled", True):
         return ""
     thread = current_thread(when)
     if not thread:

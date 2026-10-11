@@ -8,6 +8,8 @@ import re
 
 
 CUE_PATTERNS = [
+    # First, so "smiles and waves" still waves.
+    ("wave",      r"\bwav(e|es|ing)\b"),
     ("eyeroll",   r"\broll(s|ing)?\s+(her\s+|his\s+|their\s+)?eyes\b|\beyeroll\b"),
     ("shake",     r"\bshak(e|es|ing)\s+(her\s+|his\s+|their\s+)?head\b|\bshakes\b"),
     ("nod",       r"\bnod(s|ding)?\b"),
@@ -27,7 +29,7 @@ CUE_PATTERNS = [
     ("stare",     r"\bstar(e|es|ing)\b|\bglanc(e|es|ing)\b|\bpeer(s|ing)?\b|\bsquint(s|ing)?\b"),
     ("yawn",      r"\byawn(s|ing)?\b|\bstretch(es|ing)?\b"),
     ("think",     r"\bpaus(e|es|ing)\b|\btrails?\s+off\b"),
-    ("emote",     r"\bsnap(s|ping)?\b|\bwav(e|es|ing)\b|\bgestur(e|es|ing)\b"),
+    ("emote",     r"\bsnap(s|ping)?\b|\bgestur(e|es|ing)\b"),
 ]
 
 _COMPILED = [(name, re.compile(pat, re.I)) for name, pat in CUE_PATTERNS]

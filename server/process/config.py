@@ -10,7 +10,10 @@ everything falls back to the repo and development works as it always did.
 from pathlib import Path
 import functools
 import os
+import re
 import shutil
+import threading
+
 import yaml
 
 
@@ -43,6 +46,68 @@ def load_config():
         _seed_config()
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+# Presets are personalities, picked with `preset:` in the config or from the
+# menu while she is running. Besides its system_prompt a preset can override
+# a few settings, and those are read through setting() so a switch takes
+# effect on the next reply rather than the next restart.
+
+_preset_lock = threading.Lock()
+_preset = None
+
+
+def presets():
+    return load_config().get("presets") or {}
+
+
+def preset_label(name):
+    p = presets().get(name) or {}
+    return p.get("label") or name.replace("_", " ").capitalize()
+
+
+def preset():
+    global _preset
+    with _preset_lock:
+        if _preset is None:
+            name = str(load_config().get("preset") or "default").strip()
+            if name not in presets():
+                print(f"[config] no preset called {name!r}, using 'default'", flush=True)
+                name = "default"
+            _preset = name
+        return _preset
+
+
+def set_preset(name):
+    """Switch personality now and write the choice back to the config file,
+    so it survives a restart."""
+    global _preset
+    name = (name or "").strip()
+    if name not in presets():
+        raise ValueError(f"preset must be one of {', '.join(presets())}")
+    with _preset_lock:
+        _preset = name
+        text = CONFIG_PATH.read_text(encoding="utf-8")
+        if re.search(r"^preset:", text, re.M):
+            text = re.sub(r"^preset:.*$", f"preset: {name}", text, count=1, flags=re.M)
+        else:
+            text = f"preset: {name}\n\n" + text
+        tmp = CONFIG_PATH.with_suffix(".yaml.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, CONFIG_PATH)
+    return name
+
+
+def system_prompt():
+    return presets()[preset()]["system_prompt"]
+
+
+def setting(section, key, default=None):
+    """A setting the current preset may override."""
+    over = (presets().get(preset()) or {}).get(section) or {}
+    if key in over:
+        return over[key]
+    return (load_config().get(section) or {}).get(key, default)
 
 
 def resolve(path_str):

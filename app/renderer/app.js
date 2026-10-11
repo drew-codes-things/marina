@@ -1,6 +1,8 @@
 import { THREE, GLTFLoader, VRMLoaderPlugin, VRMUtils } from './vendor/vrm-bundle.js';
 
-const BRIDGE = 'http://127.0.0.1:8765';
+// In a browser the page comes from the bridge itself (see web-shim.js).
+const WEB = !!window.marina?.web;
+const BRIDGE = WEB ? '' : 'http://127.0.0.1:8765';
 
 const el = (id) => document.getElementById(id);
 const canvas     = el('stage');
@@ -37,17 +39,19 @@ lookTarget.position.set(0, 0, -1);
 camera.add(lookTarget);
 scene.add(camera);
 
+let vrm = null;
+
 function resize() {
   const w = window.innerWidth;
   const h = window.innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  if (vrm) frameUpperBody(vrm);
 }
 window.addEventListener('resize', resize);
 resize();
 
-let vrm = null;
 let bones = {};
 let basePose = {};
 let springs = [];
@@ -66,8 +70,12 @@ function frameUpperBody(v) {
     new THREE.Box3().setFromObject(v.scene).getCenter(target);
   }
 
-  const VIEW_HEIGHT = 0.67;
-  const DROP = 0.06;
+  // A tall, narrow screen (a phone) would show little more than her face, so
+  // pull back until at least MIN_WIDTH metres fit across, and lower the aim
+  // so her head stays near the top rather than floating in the middle.
+  const MIN_WIDTH = 0.5;
+  const VIEW_HEIGHT = Math.max(0.67, MIN_WIDTH / camera.aspect);
+  const DROP = 0.06 + (VIEW_HEIGHT - 0.67) * 0.3;
   const fovRad = (camera.fov * Math.PI) / 180;
   const dist = VIEW_HEIGHT / (2 * Math.tan(fovRad / 2));
 
@@ -283,7 +291,8 @@ function applyIdleBrow(t) {
 
   const values = {
     Fcl_BRW_Fun: room * (0.06 + 0.05 * noise1(t * 0.19 + 7) + browFlash * 0.22),
-    Fcl_BRW_Surprised: room * Math.max(0, mouthOpen * 0.14 + 0.03 * noise1(t * 0.23 + 19)),
+    Fcl_BRW_Surprised: room * Math.max(0, mouthOpen * 0.14 + browLift * 0.42
+      + 0.03 * noise1(t * 0.23 + 19)),
     Fcl_BRW_Sorrow: room * Math.max(0, 0.05 * noise1(t * 0.14 + 55)),
   };
 
@@ -428,6 +437,9 @@ function ensureAudio() {
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
 }
+
+// Mobile browsers only start audio from inside a tap.
+if (WEB) document.addEventListener('pointerdown', () => ensureAudio(), true);
 
 function decodeBase64Wav(base64) {
   const bin = atob(base64);
@@ -692,17 +704,17 @@ function updateBody(t, dtBody) {
   const swing = twist * 0.55;
 
   poseBone('leftUpperArm',
-    0.012 * armL - 0.010 * breath,
-    swing * 0.5,
-    -0.030 * armL - swing * 0.35 - lift * 0.35);
+    0.012 * armL - 0.010 * breath + cueOut.lux,
+    swing * 0.5 + cueOut.luy,
+    -0.030 * armL - swing * 0.35 - lift * 0.35 + cueOut.luz);
   poseBone('rightUpperArm',
-    0.012 * armR - 0.010 * breath,
-    swing * 0.5,
-    0.028 * armR - swing * 0.35 + lift * 0.35);
-  poseBone('leftLowerArm', 0, 0.030 * armL + swing * 0.25, -0.014 * armL);
-  poseBone('rightLowerArm', 0, -0.028 * armR + swing * 0.25, 0.013 * armR);
-  poseBone('leftHand', 0.018 * armR, 0, -0.014 * armL);
-  poseBone('rightHand', 0.017 * armL, 0, 0.013 * armR);
+    0.012 * armR - 0.010 * breath + cueOut.rux,
+    swing * 0.5 + cueOut.ruy,
+    0.028 * armR - swing * 0.35 + lift * 0.35 + cueOut.ruz);
+  poseBone('leftLowerArm', cueOut.llx, 0.030 * armL + swing * 0.25 + cueOut.lly, -0.014 * armL + cueOut.llz);
+  poseBone('rightLowerArm', cueOut.rlx, -0.028 * armR + swing * 0.25 + cueOut.rly, 0.013 * armR + cueOut.rlz);
+  poseBone('leftHand', 0.018 * armR + cueOut.lhx, cueOut.lhy, -0.014 * armL + cueOut.lhz);
+  poseBone('rightHand', 0.017 * armL + cueOut.rhx, cueOut.rhy, 0.013 * armR + cueOut.rhz);
 
   const nx = fbm(t * 0.13);
   const ny = fbm(t * 0.11 + 40);
@@ -730,6 +742,11 @@ function updateBody(t, dtBody) {
   poseBone('neck', x * 0.40, y * 0.40, z * 0.5);
   poseBone('head', x * 0.60, y * 0.60, z * 0.5);
 }
+
+// Arm channels a gesture or resting pose can drive: r/l, then upper arm, lower arm
+// and hand, then the axis. 'rlz' is the right lower arm's z rotation.
+const ARM_CHANNELS = ['rux', 'ruy', 'ruz', 'rlx', 'rly', 'rlz', 'rhx', 'rhy', 'rhz',
+  'lux', 'luy', 'luz', 'llx', 'lly', 'llz', 'lhx', 'lhy', 'lhz'];
 
 const ease = (p) => Math.sin(p * Math.PI);
 const settle = (p) => Math.sin(p * Math.PI) * (1 - p);
@@ -790,7 +807,30 @@ const CUES = {
                  o.shoulder += ease(p) * 0.10;
                } },
   emote:     { dur: 1.0, run: (p, o) => { o.hx += Math.sin(p * TAU) * 0.06; } },
+  // The arm itself is placed by applyWaveIK(); this only reports progress
+  // and adds the face.
+  wave:      { dur: 2.8, run: (p, o) => {
+                 waveIK.p = p;
+                 const up = raiseLower(p, 0.22, 0.25);
+                 o.lArm = Math.max(o.lArm, up);
+                 o.hz -= 0.04 * up;
+                 o.hy += 0.03 * up;
+                 o.expr.happy = Math.max(o.expr.happy, up * 0.3);
+               } },
 };
+
+const smooth01 = (x) => x * x * (3 - 2 * x);
+
+
+// 0 to 1 and back: rises over the first `rise` of the gesture, falls over the last `fall`.
+function raiseLower(p, rise, fall) {
+  return smooth01(Math.min(1, p / rise)) * smooth01(Math.min(1, (1 - p) / fall));
+}
+
+
+// Where the arms rest, as offsets from REST_POSE: elbows slightly bent and a
+// little away from her sides, so they don't hang dead straight.
+const ARM_REST = { rux: -0.15, ruz: -0.08, rly: 0.5, lux: -0.15, luz: 0.08, lly: -0.5 };
 
 const CUE_EXPRESSIONS = ['happy', 'sad', 'angry', 'relaxed', 'surprised'];
 
@@ -800,8 +840,21 @@ let cueClock = -1;
 
 let cueEpoch = -1;
 
-const cueOut = { hx: 0, hy: 0, hz: 0, shoulder: 0, gazeX: 0, gazeY: 0, blinkLeft: 0, expr: {} };
-const cueScratch = { hx: 0, hy: 0, hz: 0, shoulder: 0, gazeX: 0, gazeY: 0, blinkLeft: 0, expr: {} };
+// rArm and lArm say how much a gesture owns that arm, 0 to 1, so the resting
+// pose underneath steps aside instead of adding to it.
+const CUE_CHANNELS = ['hx', 'hy', 'hz', 'shoulder', 'gazeX', 'gazeY', 'rArm', 'lArm',
+  ...ARM_CHANNELS];
+
+function clearCue(o) {
+  for (const k of CUE_CHANNELS) o[k] = 0;
+  o.blinkLeft = 0;
+  for (const name of CUE_EXPRESSIONS) o.expr[name] = 0;
+}
+
+const cueOut = { expr: {} };
+const cueScratch = { expr: {} };
+clearCue(cueOut);
+clearCue(cueScratch);
 
 function scheduleCues(cues, duration) {
   pendingCues = (cues || []).map((c) => ({
@@ -823,6 +876,11 @@ function appendCues(cues, offset, duration) {
 }
 
 const IDLE_GESTURES = ['tilt', 'lean', 'smile', 'nod', 'shrug', 'think', 'brow', 'sigh', 'eyeroll', 'stare'];
+// In front of strangers, sighs, eye-rolls and blank stares read as rude.
+const PRESENTING_GESTURES = ['tilt', 'lean', 'smile', 'nod', 'brow', 'think'];
+
+// Set on <html> while the presentation personality is active.
+const presenting = () => document.documentElement.classList.contains('presenting');
 
 let gestureBag = [];
 let lastGesture = null;
@@ -830,7 +888,7 @@ let gestureTimer = 6 + Math.random() * 8;
 
 function drawGesture() {
   if (!gestureBag.length) {
-    gestureBag = IDLE_GESTURES.slice();
+    gestureBag = (presenting() ? PRESENTING_GESTURES : IDLE_GESTURES).slice();
     for (let i = gestureBag.length - 1; i > 0; i--) {
       const j = (Math.random() * (i + 1)) | 0;
       [gestureBag[i], gestureBag[j]] = [gestureBag[j], gestureBag[i]];
@@ -847,7 +905,10 @@ function drawGesture() {
 }
 
 function updateIdleGestures(dt) {
-  if (cueClock >= 0 || mouthOpen > 0.05) { gestureTimer = Math.max(gestureTimer, 2.5); return; }
+  if (cueClock >= 0 || mouthOpen > 0.05 || busy || recording) {
+    gestureTimer = Math.max(gestureTimer, 2.5);
+    return;
+  }
 
   gestureTimer -= dt;
   if (gestureTimer > 0) return;
@@ -859,9 +920,8 @@ function updateIdleGestures(dt) {
 }
 
 function updateCues(dt) {
-  cueOut.hx = cueOut.hy = cueOut.hz = 0;
-  cueOut.shoulder = cueOut.gazeX = cueOut.gazeY = cueOut.blinkLeft = 0;
-  for (const name of CUE_EXPRESSIONS) cueOut.expr[name] = 0;
+  clearCue(cueOut);
+  waveIK.p = -1;
 
   if (cueEpoch >= 0 && audioCtx) {
     cueClock = audioCtx.currentTime - cueEpoch;
@@ -887,16 +947,9 @@ function updateCues(dt) {
 
     if (c.gain === undefined || c.gain === 1) { c.run(p, cueOut); continue; }
 
-    cueScratch.hx = cueScratch.hy = cueScratch.hz = 0;
-    cueScratch.shoulder = cueScratch.gazeX = cueScratch.gazeY = cueScratch.blinkLeft = 0;
-    for (const name of CUE_EXPRESSIONS) cueScratch.expr[name] = 0;
+    clearCue(cueScratch);
     c.run(p, cueScratch);
-    cueOut.hx += cueScratch.hx * c.gain;
-    cueOut.hy += cueScratch.hy * c.gain;
-    cueOut.hz += cueScratch.hz * c.gain;
-    cueOut.shoulder += cueScratch.shoulder * c.gain;
-    cueOut.gazeX += cueScratch.gazeX * c.gain;
-    cueOut.gazeY += cueScratch.gazeY * c.gain;
+    for (const k of CUE_CHANNELS) cueOut[k] += cueScratch[k] * c.gain;
     cueOut.blinkLeft = Math.max(cueOut.blinkLeft, cueScratch.blinkLeft * c.gain);
     for (const name of CUE_EXPRESSIONS) {
       cueOut.expr[name] = Math.max(cueOut.expr[name], cueScratch.expr[name] * c.gain);
@@ -934,6 +987,7 @@ function updateHair(t) {
 
 function updateGaze(dt, t) {
   gazeTimer -= dt;
+  if (recording && gazeAway) gazeTimer = 0;
   if (gazeTimer <= 0) {
     const from = { x: gazeTarget.x, y: gazeTarget.y };
 
@@ -944,7 +998,7 @@ function updateGaze(dt, t) {
 
       gazeTimer = (speaking() ? 2.6 : 1.6) + Math.random() * 3.4;
       browFlash = 1;
-    } else if (Math.random() < (speaking() ? 0.16 : 0.45)) {
+    } else if (!recording && Math.random() < (speaking() ? 0.16 : 0.45)) {
       gazeAway = true;
       const a = AVERSIONS[(Math.random() * AVERSIONS.length) | 0];
 
@@ -1030,7 +1084,9 @@ function updateMood(dt) {
   if (moodTimer <= 0) {
     moodTimer = 4 + Math.random() * 9;
 
-    moodTarget = Math.random() < 0.5 ? 0 : 0.05 + Math.random() * 0.10;
+    moodTarget = presenting()
+      ? 0.10 + Math.random() * 0.12
+      : Math.random() < 0.5 ? 0 : 0.05 + Math.random() * 0.10;
   }
   mood += (moodTarget - mood) * Math.min(1, dt * 1.3);
 
@@ -1040,6 +1096,205 @@ function updateMood(dt) {
   em.setValue('angry', cueOut.expr.angry);
   em.setValue('relaxed', cueOut.expr.relaxed);
   em.setValue('surprised', cueOut.expr.surprised);
+}
+
+// What she is doing shapes her whole posture: leaning in to listen, glancing
+// away to think, lifting her brows on stressed words, smiling when she's done.
+const activity = {
+  listen: 0, think: 0, thinkSide: 1,
+  nodIn: 2, beatCool: 0, wasBusy: false,
+  quietFor: 0, attractIn: 40,
+};
+let browLift = 0;
+let debugHold = null;
+
+function pushCue(name, gain = 1) {
+  const def = CUES[name];
+  if (def) activeCues.push({ run: def.run, elapsed: 0, dur: def.dur, gain });
+}
+
+function updateActivity(dt) {
+  const talking = speaking();
+  const thinking = busy && !recording && !talking;
+
+  activity.listen += ((recording ? 1 : 0) - activity.listen) * Math.min(1, dt * 3);
+  if (thinking && activity.think < 0.05) activity.thinkSide = Math.random() < 0.5 ? -1 : 1;
+  activity.think += ((thinking ? 1 : 0) - activity.think) * Math.min(1, dt * 2.5);
+
+  const L = activity.listen;
+  cueOut.hx += 0.07 * L;
+  cueOut.hz += 0.05 * L;
+  cueOut.expr.happy = Math.max(cueOut.expr.happy, 0.12 * L);
+  if (recording) {
+    activity.nodIn -= dt;
+    if (activity.nodIn <= 0) {
+      activity.nodIn = 2.2 + Math.random() * 2.6;
+      pushCue('nod', 0.4);
+    }
+  } else {
+    activity.nodIn = 1.6;
+  }
+
+  const T = activity.think;
+  cueOut.gazeX += 0.32 * T * activity.thinkSide;
+  cueOut.gazeY += 0.30 * T;
+  cueOut.hz += 0.07 * T * activity.thinkSide;
+  cueOut.hx -= 0.03 * T;
+
+  // A small nod on a stressed syllable, at most every 0.9 s.
+  const stress = Math.max(0, envFast - envSlow);
+  activity.beatCool -= dt;
+  if (talking && stress > 0.16 && activity.beatCool <= 0) {
+    activity.beatCool = 0.9 + Math.random() * 0.8;
+    pushCue('nod', 0.22);
+  }
+  const lift = talking ? clamp01(stress * 3.2) * 0.8 : 0.3 * L;
+  browLift += (lift - browLift) * Math.min(1, dt * (lift > browLift ? 14 : 4));
+
+  if (activity.wasBusy && !busy && !recording) pushCue('smile', 0.4);
+  activity.wasBusy = busy || recording;
+
+  // Arms stay at rest; a gesture that owns an arm (the wave) takes it over.
+  const freeR = 1 - clamp01(cueOut.rArm);
+  const freeL = 1 - clamp01(cueOut.lArm);
+  for (const k in ARM_REST) cueOut[k] += ARM_REST[k] * (k[0] === 'r' ? freeR : freeL);
+
+  if (debugHold) for (const k in debugHold) cueOut[k] += debugHold[k];
+
+  // At an event, catch the eye of people walking past with a smile now and
+  // then. She only waves when she's greeting someone.
+  if (busy || recording || talking) {
+    activity.quietFor = 0;
+  } else {
+    activity.quietFor += dt;
+  }
+  if (presenting() && activity.quietFor > 30) {
+    activity.attractIn -= dt;
+    if (activity.attractIn <= 0) {
+      activity.attractIn = 35 + Math.random() * 30;
+      pushCue('smile', 0.7);
+    }
+  }
+}
+
+// Waving, by inverse kinematics. Nudging joint angles can't keep the hand on a
+// clean path, so the wave says where the left hand should be relative to her
+// shoulder and works out the elbow. Directions come from the model's own root,
+// so they hold however she is turned.
+const waveIK = { p: -1 };
+const _ikA = new THREE.Vector3(), _ikB = new THREE.Vector3(), _ikC = new THREE.Vector3();
+const _ikE = new THREE.Vector3(), _ikT = new THREE.Vector3(), _ikP = new THREE.Vector3();
+const _ikD = new THREE.Vector3(), _ikV = new THREE.Vector3(), _ikM = new THREE.Vector3();
+const _out = new THREE.Vector3(), _upv = new THREE.Vector3(), _fwd = new THREE.Vector3();
+const _fing = new THREE.Vector3(), _palm = new THREE.Vector3(), _thumb = new THREE.Vector3();
+const _ikQ = new THREE.Quaternion(), _ikQP = new THREE.Quaternion(), _ikQW = new THREE.Quaternion();
+const _ikMat = new THREE.Matrix4();
+
+// Turn a bone in world space, blended in by `weight`.
+function setWorldQuat(node, worldQuat, weight) {
+  node.parent.getWorldQuaternion(_ikQP);
+  _ikQ.copy(_ikQP).invert().multiply(worldQuat);
+  node.quaternion.slerp(_ikQ, weight);
+  node.updateMatrixWorld(true);
+}
+
+// Swing `node` so its child lands on `target`.
+function aimBone(node, child, target, weight) {
+  node.getWorldPosition(_ikA);
+  child.getWorldPosition(_ikB);
+  _ikD.subVectors(_ikB, _ikA).normalize();
+  _ikV.subVectors(target, _ikA).normalize();
+  _ikQ.setFromUnitVectors(_ikD, _ikV);
+  node.getWorldQuaternion(_ikQW).premultiply(_ikQ);
+  setWorldQuat(node, _ikQW, weight);
+}
+
+function solveArm(upper, lower, hand, target, pole, weight) {
+  upper.getWorldPosition(_ikA);
+  lower.getWorldPosition(_ikB);
+  hand.getWorldPosition(_ikC);
+  const l1 = _ikA.distanceTo(_ikB);
+  const l2 = _ikB.distanceTo(_ikC);
+  _ikD.subVectors(target, _ikA);
+  const d = Math.min(_ikD.length(), (l1 + l2) * 0.995);
+  _ikD.normalize();
+  const along = (l1 * l1 - l2 * l2 + d * d) / (2 * d);
+  const off = Math.sqrt(Math.max(0, l1 * l1 - along * along));
+  _ikV.subVectors(pole, _ikA);
+  _ikV.addScaledVector(_ikD, -_ikV.dot(_ikD)).normalize();
+  _ikE.copy(_ikA).addScaledVector(_ikD, along).addScaledVector(_ikV, off);
+  _ikT.copy(_ikA).addScaledVector(_ikD, d);
+  aimBone(upper, lower, _ikE, weight);
+  aimBone(lower, hand, _ikT, weight);
+}
+
+const bez = (a, b, c, t, out) => out.copy(a).multiplyScalar((1 - t) * (1 - t))
+  .addScaledVector(b, 2 * (1 - t) * t).addScaledVector(c, t * t);
+
+function applyWaveIK() {
+  const p = waveIK.p;
+  const upper = bones.leftUpperArm, lower = bones.leftLowerArm, hand = bones.leftHand;
+  if (p < 0 || !upper || !lower || !hand) return;
+
+  // Her own axes: out is towards her left hand, forward is towards the viewer.
+  vrm.scene.getWorldQuaternion(_ikQW);
+  _out.set(1, 0, 0).applyQuaternion(_ikQW);
+  _upv.set(0, 1, 0).applyQuaternion(_ikQW);
+  _fwd.set(0, 0, 1).applyQuaternion(_ikQW);
+
+  upper.updateWorldMatrix(true, true);
+  const shoulder = upper.getWorldPosition(new THREE.Vector3());
+  const rest = hand.getWorldPosition(new THREE.Vector3());
+
+  // Hand up and out beside her head, a little in front of her; on the way up
+  // and down it passes in front of her chest. Units are metres.
+  // On a narrow screen (a phone) there's less room at her side, so the hand
+  // stays closer in: beside her head at temple height, clear of her face.
+  // (The shoulder joint sits near her neck, well inside the visible shoulder.)
+  const narrow = camera.aspect < 0.75;
+  const top = narrow
+    ? shoulder.clone().addScaledVector(_out, 0.07)
+      .addScaledVector(_upv, 0.15).addScaledVector(_fwd, 0.14)
+    : shoulder.clone().addScaledVector(_out, 0.24)
+      .addScaledVector(_upv, 0.13).addScaledVector(_fwd, 0.14);
+  const via = shoulder.clone().addScaledVector(_out, 0.04)
+    .addScaledVector(_upv, -0.12).addScaledVector(_fwd, 0.26);
+
+  const RAISE = 0.22, LOWER = 0.78;
+  let weight, roll = 0;
+  if (p < RAISE) {
+    const r = smooth01(p / RAISE);
+    bez(rest, via, top, r, _ikM);
+    weight = smooth01(Math.min(1, p / (RAISE * 0.4)));
+  } else if (p > LOWER) {
+    const r = smooth01((p - LOWER) / (1 - LOWER));
+    bez(top, via, rest, r, _ikM);
+    weight = smooth01(Math.min(1, (1 - p) / ((1 - LOWER) * 0.4)));
+  } else {
+    // The wave: the hand sweeps side to side and rocks with it.
+    const w = (p - RAISE) / (LOWER - RAISE);
+    const swing = Math.sin(w * TAU * 2.5) * Math.min(1, w * 6, (1 - w) * 6);
+    _ikM.copy(top).addScaledVector(_out, (narrow ? 0.04 : 0.06) * swing);
+    roll = 0.32 * swing;
+    weight = 1;
+  }
+
+  // Elbow points down and out, like a natural wave.
+  _ikP.copy(shoulder).addScaledVector(_out, 0.5).addScaledVector(_upv, -0.45)
+    .addScaledVector(_fwd, -0.05);
+  solveArm(upper, lower, hand, _ikM, _ikP, weight);
+
+  // Palm to the viewer, fingers up, rocking slightly. At rest the left hand's
+  // fingers point along +x and the palm faces -y.
+  _fing.copy(_upv).multiplyScalar(Math.cos(roll)).addScaledVector(_out, Math.sin(roll + 0.15));
+  _fing.normalize();
+  _palm.copy(_fwd).addScaledVector(_fing, -_fwd.dot(_fing)).normalize();
+  _thumb.crossVectors(_palm, _fing);
+  _ikMat.makeBasis(_fing, _palm.clone().negate(), _thumb);
+  _ikQW.setFromRotationMatrix(_ikMat);
+  const handWeight = p < RAISE ? smooth01(p / RAISE) : p > LOWER
+    ? smooth01((1 - p) / (1 - LOWER)) : 1;
+  setWorldQuat(hand, _ikQW, handWeight);
 }
 
 const timer = new THREE.Timer();
@@ -1053,9 +1308,11 @@ function tick() {
   if (vrm) {
     updateMouth(dt);
     updateCues(dt);
+    updateActivity(dt);
     updateIdleGestures(dt);
     updateGaze(dt, t);
     updateBody(t, dt);
+    applyWaveIK();
     updateBlink(dt);
     updateMood(dt);
     updateHair(t);
@@ -1117,6 +1374,7 @@ function setSolid(next) {
 }
 
 function updateClickThrough() {
+  if (document.documentElement.classList.contains('stage')) return;
   if (!cursor) return;
   const [x, y] = cursor;
   setSolid(overUI(x, y) || overAvatar(x, y));
@@ -1128,6 +1386,8 @@ let busy = false;
 let recording = false;
 
 function setStatus(kind, text) {
+  // Guests don't need to see model names or file names.
+  if (kind === 'ok' && presenting()) text = 'ready';
   dot.className = kind;
   statusText.textContent = text;
 }
@@ -1145,7 +1405,7 @@ window.marina.onBridgeUp?.(() => {
 
 function showNotice(msg, kind = 'general') {
   noticeKind = kind;
-  notice.textContent = msg;
+  el('notice-text').textContent = msg;
   notice.classList.remove('hidden');
 }
 
@@ -1153,6 +1413,19 @@ function hideNotice(kind = null) {
   if (kind !== null && noticeKind !== kind) return;
   noticeKind = null;
   notice.classList.add('hidden');
+}
+
+el('notice-close').addEventListener('click', () => hideNotice());
+
+// What she heard, so people watching can see she understood. Most useful in
+// a noisy room.
+let heardTimer = null;
+function showHeard(text) {
+  const h = el('heard');
+  h.textContent = `\u201c${text}\u201d`;
+  h.classList.remove('hidden');
+  clearTimeout(heardTimer);
+  heardTimer = setTimeout(() => h.classList.add('hidden'), 5000 + text.length * 50);
 }
 
 let bubbleTimer = null;
@@ -1248,6 +1521,7 @@ async function consumeReply(res, req) {
   for await (const ev of readEvents(res)) {
     if (req.cancelled) continue;
     if (ev.type === 'chunk') await playChunk(ev, req);
+    else if (ev.type === 'start' && req.voice && ev.transcript) showHeard(ev.transcript);
     else if (ev.type === 'error') showNotice(ev.message, 'bridge');
   }
   if (!req.cancelled) {
@@ -1406,18 +1680,57 @@ async function interrupt() {
   return heard;
 }
 
+// The Mac app records through the bridge. A browser has to record itself
+// and upload the clip.
+let webRec = null;
+
+async function webStartRecording() {
+  if (navigator.audioSession) navigator.audioSession.type = 'play-and-record';
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true },
+  });
+  const rec = new MediaRecorder(stream);
+  const parts = [];
+  rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+  rec.start();
+  webRec = { rec, stream, parts };
+}
+
+function webStopRecording() {
+  const r = webRec;
+  webRec = null;
+  return new Promise((resolve) => {
+    r.rec.onstop = () => {
+      r.stream.getTracks().forEach((t) => t.stop());
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+      resolve(new Blob(r.parts, { type: r.rec.mimeType }));
+    };
+    r.rec.stop();
+  });
+}
+
+async function webUploadClip() {
+  const clip = await webStopRecording();
+  const ext = clip.type.includes('mp4') ? 'm4a' : clip.type.includes('ogg') ? 'ogg' : 'webm';
+  const form = new FormData();
+  form.append('audio', clip, `clip.${ext}`);
+  return fetch('/voice/stream', { method: 'POST', body: form });
+}
+
 async function toggleListen() {
   if (busy && !recording) return;
 
   if (!recording) {
     try {
-      await post('/listen/start');
+      if (WEB) await webStartRecording();
+      else await post('/listen/start');
       recording = true;
       btnMic.classList.add('recording');
       setStatus('busy', 'listening…');
       hideNotice('bridge');
-    } catch {
-      bridgeLost();
+    } catch (e) {
+      if (WEB) showNotice(`Can't use the microphone: ${e.message}`);
+      else bridgeLost();
     }
     return;
   }
@@ -1426,8 +1739,11 @@ async function toggleListen() {
   btnMic.classList.remove('recording');
   setBusy(true, 'transcribing');
   const req = newRequest();
+  req.voice = true;
   try {
-    const res = await fetch(BRIDGE + '/listen/stop/stream', { method: 'POST' });
+    const res = WEB
+      ? await webUploadClip()
+      : await fetch(BRIDGE + '/listen/stop/stream', { method: 'POST' });
 
     await consumeReply(res, req);
   } catch (e) {
@@ -1487,26 +1803,72 @@ window.marina.onToggleListen(toggleListen);
 
 window.marina.onInterrupt?.(() => { interrupt(); });
 
+window.marina.onSetPreset?.((name) => { switchPreset(name); });
+
+window.marina.onSetStage?.((on) => {
+  document.documentElement.classList.toggle('stage', on);
+  if (on) setSolid(true);
+  resize();
+});
+
+// For app/test scripts: play a gesture or fake a state without a mic.
+if (new URLSearchParams(location.search).has('debug')) {
+  window.marinaDebug = {
+    cue: (name, gain) => pushCue(name, gain),
+    heard: (text) => showHeard(text),
+    say: (text) => say(text),
+    hold: (offsets) => { debugHold = offsets; },
+    turn: (radians) => { if (vrm) vrm.scene.rotation.y = radians; },
+    state: (name) => {
+      recording = name === 'listen';
+      busy = name === 'think';
+    },
+  };
+}
+
+// Space starts and stops listening, like the mic button, unless you're typing.
+document.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+  if (!el('picker').classList.contains('hidden')) return;
+  e.preventDefault();
+  toggleListen();
+});
+
 window.marina.onSetOpeners?.((on) => {
   setIdleMuted(!on);
   if (!idleMuted) startOpenerPoll();
 });
 
 let brainMode = 'auto';
+let personality = { preset: 'default', presets: [] };
+// Filled in from the bridge; these are only what to show before it answers.
+let brainLabels = { server: 'GPU server', local: 'This Mac' };
+let brainOrder = ['server', 'local'];
+
+function brainLabel(name) { return brainLabels[name] || name || '?'; }
+
+function learnBrains(labels) {
+  if (!labels || !Object.keys(labels).length) return;
+  brainLabels = labels;
+  brainOrder = Object.keys(labels);
+}
 
 function paintBrain(mode, current, model) {
   brainMode = mode;
   const b = el('btn-brain');
   if (!b) return;
-  const where = mode === 'auto' ? `auto → ${current || '?'}` : mode;
-  b.title = `${where}${model ? ` · ${model}` : ''} (click to change)`;
-  b.classList.toggle('on', mode === 'local');
+  const where = mode === 'auto' ? `auto → ${brainLabel(current)}` : brainLabel(mode);
+  const style = personality.presets.find((p) => p.name === personality.preset)?.label;
+  b.title = `${style ? `${style} mode · ` : ''}${where}${model ? ` · ${model}` : ''} (click to change)`;
+  b.classList.toggle('on', mode !== 'auto' && mode !== brainOrder[0]);
 }
 
 function pickItem(label, sub, selected, onClick, dim) {
   const d = document.createElement('div');
   d.className = 'pick-item' + (selected ? ' on' : '') + (dim ? ' dim' : '');
-  d.innerHTML = `<span class="tick">${selected ? '\u2713' : ''}</span><span>${label}</span>`;
+  d.innerHTML = `<span class="tick">${selected ? '✓' : ''}</span><span>${label}</span>`;
   if (sub) d.title = sub;
   if (!dim) d.addEventListener('click', onClick);
   return d;
@@ -1526,32 +1888,45 @@ async function openPicker() {
     return;
   }
 
+  const backends = data.backends || ['server', 'local'].map((name) => ({
+    name, label: brainLabel(name), models: data[name] || [],
+  }));
+  learnBrains(Object.fromEntries(backends.map((b) => [b.name, b.label])));
+
   list.innerHTML = '';
 
+  if (data.presets?.length > 1) {
+    personality = { preset: data.preset, presets: data.presets };
+    markPresenting(data.preset);
+    pickGroup(list, 'Mode');
+    for (const p of data.presets) {
+      list.appendChild(pickItem(p.label, `Switch to the ${p.label} personality`,
+        data.preset === p.name,
+        async () => { closePicker(); await switchPreset(p.name); }));
+    }
+    pickGroup(list, 'Brain');
+  }
+
   list.appendChild(pickItem(
-    'Automatic', 'Prefer the server, fall back to this Mac',
+    'Automatic', `Try ${backends.map((b) => b.label).join(', then ')}`,
     data.mode === 'auto',
     async () => { await post('/backend', { mode: 'auto' }); await refreshBrain(); closePicker(); },
   ));
 
-  for (const which of ['server', 'local']) {
-    const models = data[which] || [];
-    const head = document.createElement('div');
-    head.className = 'pick-group';
-    head.textContent = which === 'server' ? 'GPU server' : 'This Mac';
-    list.appendChild(head);
+  for (const { name, label, models } of backends) {
+    pickGroup(list, label);
 
     if (!models.length) {
       list.appendChild(pickItem(
-        which === 'server' ? 'unreachable' : 'no models found', '', false, null, true));
+        name === 'local' ? 'no models found' : 'unreachable', '', false, null, true));
       continue;
     }
     for (const m of models) {
-      const on = data.mode === which && data.selected[which] === m;
-      list.appendChild(pickItem(m, `Run ${m} on the ${which}`, on, async () => {
-        await post('/model', { backend: which, model: m });
+      const on = data.mode === name && data.selected[name] === m;
+      list.appendChild(pickItem(m, `Run ${m} on ${label}`, on, async () => {
+        await post('/model', { backend: name, model: m });
         await refreshBrain();
-        say(which === 'local' ? `Running ${m} here.` : `Using ${m} on the server.`);
+        say(name === 'local' ? `Running ${m} here.` : `Using ${m} on ${label}.`);
         closePicker();
       }));
     }
@@ -1560,22 +1935,51 @@ async function openPicker() {
 
 function closePicker() { el('picker').classList.add('hidden'); }
 
+function pickGroup(list, text) {
+  const head = document.createElement('div');
+  head.className = 'pick-group';
+  head.textContent = text;
+  list.appendChild(head);
+}
+
+// Personality, e.g. Personal or Presentation. The bridge applies it from the
+// next reply on, and each one keeps its own conversation.
+function markPresenting(preset) {
+  document.documentElement.classList.toggle('presenting', preset === 'presentation');
+}
+
+async function switchPreset(name) {
+  let res;
+  try {
+    res = await post('/preset', { name });
+  } catch {
+    bridgeLost();
+    return;
+  }
+  if (!res.ok) { showNotice(res.error); return; }
+  personality = { preset: res.preset, presets: res.presets };
+  markPresenting(res.preset);
+  if (res.idle) idleMuted = !!res.idle.muted || res.idle.enabled === false;
+  if (res.barge_in !== undefined) bargeEnabled = res.barge_in;
+  const label = res.presets.find((p) => p.name === res.preset)?.label || res.preset;
+  say(`${label} mode.`);
+  await refreshBrain();
+}
+
+// Falling back to the next brain is normal in Automatic, so it only shows in
+// the status line, not as a warning.
 function noteBackendUsed(data) {
   if (!data || !data.backend) return;
-  const label = data.backend === 'local' ? 'this Mac' : 'GPU server';
-  setStatus('ok', `${label} · ${data.model || ''}`.trim());
-  if (data.backend === 'local' && brainMode === 'auto') {
-    showNotice('GPU server did not answer, running on this Mac.', 'failover');
-  } else {
-    hideNotice('failover');
-  }
+  setStatus('ok', `${brainLabel(data.backend)} · ${data.model || ''}`.trim());
 }
 
 async function refreshBrain() {
   try {
     const h = await (await fetch(`${BRIDGE}/health`)).json();
+    learnBrains(h.llm_labels);
+    if (h.preset) { personality.preset = h.preset; markPresenting(h.preset); }
     paintBrain(h.llm_mode, h.llm_using, h.model);
-    setStatus('ok', `${h.llm_using} · ${h.model}`);
+    setStatus('ok', `${brainLabel(h.llm_using)} · ${h.model}`);
   } catch {}
 }
 
@@ -1666,6 +2070,8 @@ async function pollForBridge({ quietFor = 16000 } = {}) {
 
         const see = el('btn-see');
         if (see) see.hidden = !info.vision;
+        learnBrains(info.llm_labels);
+        if (info.preset) markPresenting(info.preset);
         paintBrain(info.llm_mode || 'auto', info.llm_using, info.model);
         setStatus('ok', `ready · ${info.model}`);
         hideNotice('bridge');

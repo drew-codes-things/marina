@@ -8,16 +8,21 @@ import threading
 import time
 from urllib.parse import urlparse
 
-from process.config import load_config
+from process.config import load_config, setting
 from process.memory import store as memory
 
 _config = load_config()
 _cfg = _config.get("tools") or {}
 
-ENABLED = bool(_cfg.get("enabled", True))
-ALLOW_CLIPBOARD = bool(_cfg.get("clipboard", True))
-ALLOW_OPEN_URL = bool(_cfg.get("open_url", True))
-ALLOW_TIMERS = bool(_cfg.get("timers", True))
+
+
+# Read on every call: the presentation preset turns some of these off.
+def _allowed(key):
+    return bool(setting("tools", key, True))
+
+def _may_remember():
+    return bool(setting("llm", "remember", True))
+
 CLIPBOARD_LIMIT = int(_cfg.get("clipboard_chars", 2000))
 
 _announcements = []
@@ -35,7 +40,7 @@ def _announce(text):
 
 
 def set_timer(minutes, label=""):
-    if not ALLOW_TIMERS:
+    if not _allowed("timers"):
         return "Timers are switched off."
     try:
         minutes = float(minutes)
@@ -58,7 +63,7 @@ def set_timer(minutes, label=""):
 
 
 def read_clipboard():
-    if not ALLOW_CLIPBOARD:
+    if not _allowed("clipboard"):
         return "The clipboard is off limits."
     try:
         out = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=2)
@@ -74,7 +79,7 @@ def read_clipboard():
 
 
 def open_url(url):
-    if not ALLOW_OPEN_URL:
+    if not _allowed("open_url"):
         return "Opening links is switched off."
     url = (url or "").strip()
     parsed = urlparse(url)
@@ -98,7 +103,7 @@ def remember(fact):
 
 
 SPECS = [
-    ("set_timer", set_timer, ALLOW_TIMERS, {
+    ("set_timer", set_timer, lambda: _allowed("timers"), {
         "description": "Set a timer that will go off after a number of minutes. "
                        "Use when they ask to be reminded of something soon.",
         "parameters": {
@@ -109,7 +114,7 @@ SPECS = [
             },
             "required": ["minutes"],
         }}),
-    ("read_clipboard", read_clipboard, ALLOW_CLIPBOARD, {
+    ("read_clipboard", read_clipboard, lambda: _allowed("clipboard"), {
         "description": "Read what is on the clipboard. You cannot see it any "
                        "other way, so call this whenever they mention "
                        "something they copied or pasted, or refer to 'this' "
@@ -117,14 +122,14 @@ SPECS = [
                        "they copied.",
         "parameters": {"type": "object", "properties": {}},
         }),
-    ("open_url", open_url, ALLOW_OPEN_URL, {
+    ("open_url", open_url, lambda: _allowed("open_url"), {
         "description": "Open a web link in their browser. Only http and https.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
         }}),
-    ("remember", remember, True, {
+    ("remember", remember, _may_remember, {
         "description": "Write down a lasting fact about the person you are talking to, so it "
                        "survives this conversation. Only things that stay true: their name, "
                        "what they do, what they like, people and pets in their "
@@ -137,24 +142,23 @@ SPECS = [
         }}),
 ]
 
-_HANDLERS = {name: fn for name, fn, on, _ in SPECS if on}
-
+_HANDLERS = {name: (fn, on) for name, fn, on, _ in SPECS}
 
 def definitions():
-    if not ENABLED:
+    if not _allowed("enabled"):
         return None
     tools = [
         {"type": "function",
          "function": {"name": name, **spec}}
-        for name, _fn, on, spec in SPECS if on
+        for name, _fn, on, spec in SPECS if on()
     ]
     return tools or None
 
 
 def run(name, arguments):
     """Run one tool call. Errors are returned as text for the model."""
-    fn = _HANDLERS.get(name)
-    if fn is None:
+    fn, on = _HANDLERS.get(name, (None, None))
+    if fn is None or not on():
         return f"There is no tool called {name}."
     try:
         args = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})

@@ -5,6 +5,12 @@ transparent window that stays on top of everything else, and you can either
 talk to her out loud or type. She answers in her own voice, lip syncs while
 she does it, and acts out the little stage directions she writes.
 
+### [Download Marina 1.0.0 for macOS (.dmg)](https://github.com/skep13/marina/releases/download/v1.0.0/Marina-1.0.0-arm64.dmg)
+
+A ready-to-run app. Open the dmg, drag Marina to Applications, done. No build
+step, no Python, no setup script. Apple Silicon, macOS 13 or newer. See
+[Getting past Gatekeeper](#getting-past-gatekeeper) the first time you open it.
+
 ![Marina on my desktop](screenshot.jpg)
 
 It started as a fork of [rayenfeng/riko_project](https://github.com/rayenfeng/riko_project).
@@ -83,6 +89,11 @@ Her config, memory and chat history live in
 - Knows what day and time of day it is
 - Can look at your screen when you ask (off by default)
 - Lip sync with five mouth shapes
+- A presentation mode for showing her to people: a poised personality, no
+  personal memories, and its own conversation. Switch from the menu on her
+  status line
+- Stage view (⌘⇧F): full screen with large subtitles, for turning the laptop
+  round at an event
 - Hair physics, blinking and eye movement
 - `*actions*` in her replies play as animations instead of being read out
 - Long-term memory

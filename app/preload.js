@@ -14,5 +14,7 @@ contextBridge.exposeInMainWorld('marina', {
   onBridgeUp: (cb) => ipcRenderer.on('bridge-up', () => cb()),
   onSetOpeners: (cb) => ipcRenderer.on('set-openers', (_e, on) => cb(on)),
   onInterrupt: (cb) => ipcRenderer.on('interrupt', () => cb()),
+  onSetPreset: (cb) => ipcRenderer.on('set-preset', (_e, name) => cb(name)),
+  onSetStage: (cb) => ipcRenderer.on('set-stage', (_e, on) => cb(on)),
   openersChanged: (on) => ipcRenderer.send('openers-changed', on),
 });

@@ -1,7 +1,7 @@
 """Chat completions client with on-disk history.
 
 Works with anything OpenAI-compatible (OpenAI, Ollama, llama.cpp, LM Studio,
-vLLM). Set `llm.base_url` in character_config.yaml.
+vLLM). Which endpoints exist and in what order is up to process.backend.
 """
 import json
 import os
@@ -9,12 +9,15 @@ import random
 import threading
 import time
 
-from openai import OpenAI
+from openai import OpenAI, Timeout
+
+from process import backend
 
 from process.backend import current as backend_current
 from process.backend import mode as backend_mode
 from process.backend import model_for
 from process.backend import note_used
+from process import config
 from process.config import load_config, resolve_data
 from process.memory import extract as memory_extract
 from process.memory import persona
@@ -26,17 +29,33 @@ char_config = load_config()
 
 _llm = char_config.get("llm") or {}
 
-BASE_URL = (_llm.get("base_url") or "").strip() or None
-API_KEY = _llm.get("api_key") or char_config.get("OPENAI_API_KEY") or "not-needed"
-MODEL = _llm.get("model") or char_config.get("model")
-TEMPERATURE = _llm.get("temperature", 1.0)
 MAX_TOKENS = _llm.get("max_tokens", 2048)
 
 HISTORY_TURNS = int(_llm.get("history_turns", 12))
-REMEMBER = bool(_llm.get("remember", True))
 
-HISTORY_FILE = resolve_data(char_config["history_file"])
-BASE_SYSTEM_PROMPT = char_config["presets"]["default"]["system_prompt"]
+_HISTORY_BASE = resolve_data(char_config["history_file"])
+
+
+def _history_file():
+    """Each preset keeps its own conversation, so switching to a
+    presentation personality doesn't bring the personal one along."""
+    name = config.preset()
+    if name == "default":
+        return str(_HISTORY_BASE)
+    return str(_HISTORY_BASE.with_name(f"{_HISTORY_BASE.stem}.{name}{_HISTORY_BASE.suffix}"))
+
+
+def _temperature():
+    return config.setting("llm", "temperature", 1.0)
+
+
+def _remember():
+    return bool(config.setting("llm", "remember", True))
+
+
+def _recall():
+    """Off keeps what she remembers out of the prompt, e.g. for a demo."""
+    return bool(config.setting("llm", "recall", True))
 
 
 def _stable_context():
@@ -52,13 +71,12 @@ def _stable_context():
 def system_message():
     return {
         "role": "system",
-        "content": BASE_SYSTEM_PROMPT + memory.as_prompt_block() + _stable_context(),
+        "content": (config.system_prompt()
+                    + (memory.as_prompt_block() if _recall() else "")
+                    + _stable_context()),
     }
 
 
-FALLBACK_BASE = (_llm.get("fallback_base_url") or "").strip() or None
-FALLBACK_MODEL = _llm.get("fallback_model") or MODEL
-FALLBACK_KEY = _llm.get("fallback_api_key") or "not-needed"
 STICKY = float(_llm.get("fallback_sticky_seconds", 30))
 
 THINKING = bool(_llm.get("thinking", False))
@@ -68,22 +86,24 @@ SEED = _llm.get("seed")
 REPEAT_PENALTY = float(_llm.get("repeat_penalty", 1.12))
 FREQUENCY_PENALTY = float(_llm.get("frequency_penalty", 0.35))
 
-TIMEOUT = float(_llm.get("timeout_seconds", 30.0))
 
-client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=TIMEOUT, max_retries=0)
-fallback_client = (
-    OpenAI(api_key=FALLBACK_KEY, base_url=FALLBACK_BASE, timeout=60.0, max_retries=0)
-    if FALLBACK_BASE else None
-)
 
-_primary_down_until = 0.0
-_active = "server"
+def _client(b):
+    # A box that is off should fail fast so the next one gets a turn, but a
+    # model that is still loading needs the full read timeout.
+    return OpenAI(api_key=b["api_key"], base_url=b["base_url"],
+                  timeout=Timeout(b["timeout"], connect=5.0), max_retries=0)
+
+
+_clients = {b["name"]: _client(b) for b in backend.BACKENDS}
+client = _clients["server"]
+
+_down_until = {}
 
 
 def describe_endpoint():
-    if backend_current() == "local" and FALLBACK_BASE:
-        return FALLBACK_BASE
-    return BASE_URL or "https://api.openai.com/v1"
+    b = backend.get(backend_current())
+    return (b and b["base_url"]) or "https://api.openai.com/v1"
 
 
 def active_model():
@@ -94,17 +114,20 @@ def active_endpoint():
     return backend_current()
 
 
-def _pick():
+def _order():
+    """Backends to try for this call, best first."""
     m = backend_mode()
-    if m == "local":
-        if not fallback_client:
-            raise RuntimeError("Local mode selected but no fallback_base_url configured.")
-        return fallback_client, model_for("local"), "local"
-    if m == "server":
-        return client, model_for("server"), "server"
-    if fallback_client and time.time() < _primary_down_until:
-        return fallback_client, model_for("local"), "local"
-    return client, model_for("server"), "server"
+    if m != "auto":
+        return [m]
+    now = time.time()
+    up = [n for n in backend.NAMES if _down_until.get(n, 0) <= now]
+    # If everything is marked down, try them all again rather than giving up.
+    return up or list(backend.NAMES)
+
+
+def _pick():
+    which = _order()[0]
+    return _clients[which], model_for(which), which
 
 
 def _request_extras(kw):
@@ -127,29 +150,28 @@ def _request_extras(kw):
 
 
 def chat_completion(messages, **kw):
-    """Call the selected backend. Only 'auto' mode falls back to local."""
-    global _primary_down_until, _active
+    """Call the selected backend. In auto mode, fall through to the next one
+    whenever a backend can't be reached."""
     from openai import APIConnectionError, APITimeoutError
 
-    c, model, which = _pick()
     kw = _request_extras(kw)
-    try:
-        out = c.chat.completions.create(model=model, messages=messages, **kw)
-        if which == "server" and _active != "server":
-            print("[llm] server is back", flush=True)
-        _active = which
+    order = _order()
+    for i, which in enumerate(order):
+        try:
+            out = _clients[which].chat.completions.create(
+                model=model_for(which), messages=messages, **kw)
+        except (APIConnectionError, APITimeoutError):
+            if i == len(order) - 1:
+                raise
+            _down_until[which] = time.time() + STICKY
+            nxt = order[i + 1]
+            print(f"[llm] {backend.label(which)} unreachable, trying "
+                  f"{backend.label(nxt)} ({model_for(nxt)})", flush=True)
+            continue
+        if _down_until.pop(which, None):
+            print(f"[llm] {backend.label(which)} is back", flush=True)
         note_used(which)
         return out
-    except (APIConnectionError, APITimeoutError):
-        if which != "server" or backend_mode() != "auto" or not fallback_client:
-            raise
-        _primary_down_until = time.time() + STICKY
-        _active = "local"
-        note_used("local")
-        print(f"[llm] server unreachable, using {FALLBACK_MODEL} on this Mac",
-              flush=True)
-        return fallback_client.chat.completions.create(
-            model=model_for("local"), messages=messages, **kw)
 
 
 def _flatten(message):
@@ -169,8 +191,9 @@ def _flatten(message):
 
 
 def load_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+    path = _history_file()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             try:
                 raw = json.load(f)
             except json.JSONDecodeError:
@@ -200,16 +223,16 @@ def save_history(history):
     if len(msgs) > RETAIN:
         msgs = msgs[-(RETAIN - SEND_WINDOW):]
     with _history_lock:
-        tmp = f"{HISTORY_FILE}.tmp"
+        path = _history_file()
+        tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(msgs, f, indent=2)
-        os.replace(tmp, HISTORY_FILE)
+        os.replace(tmp, path)
 
 
 def _extract_backend():
-    if fallback_client is not None:
-        return fallback_client, FALLBACK_MODEL
-    return client, MODEL
+    c, model, _which = _pick()
+    return c, model
 
 
 def save_turn(user_text, assistant_text):
@@ -222,19 +245,20 @@ def save_turn(user_text, assistant_text):
             history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": assistant_text})
         save_history(history)
-    if REMEMBER and user_text is not None:
+    if _remember() and user_text is not None:
         memory_extract.remember_async(*_extract_backend(), user_text, assistant_text)
 
 
 def reset_history():
-    if os.path.exists(HISTORY_FILE):
-        os.remove(HISTORY_FILE)
+    path = _history_file()
+    if os.path.exists(path):
+        os.remove(path)
 
 
 def get_reply(messages):
     return chat_completion(
         messages,
-        temperature=TEMPERATURE,
+        temperature=_temperature(),
         max_tokens=MAX_TOKENS,
         stream=False,
     )
@@ -258,7 +282,7 @@ def llm_response(user_input):
     history.append({"role": "assistant", "content": reply})
     save_history(history)
 
-    if REMEMBER:
+    if _remember():
         memory_extract.remember_async(*_extract_backend(), user_input, reply)
 
     return reply
@@ -267,7 +291,7 @@ def llm_response(user_input):
 def get_reply_stream(messages, **kw):
     return chat_completion(
         messages,
-        temperature=TEMPERATURE,
+        temperature=_temperature(),
         max_tokens=MAX_TOKENS,
         stream=True,
         **kw,

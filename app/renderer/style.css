@@ -156,6 +156,23 @@ body.reveal #chrome { opacity: 1; }
   -webkit-backdrop-filter: blur(12px);
   user-select: text;
 }
+#notice:not(.hidden) { display: flex; align-items: flex-start; gap: 8px; }
+#notice-text { flex: 1; white-space: pre-wrap; }
+#notice-close {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  margin: -2px -4px 0 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: .75;
+  -webkit-app-region: no-drag;
+}
+#notice-close:hover { opacity: 1; background: rgba(255,255,255,.1); }
 #notice.hidden { display: none; }
 
 #bar {
@@ -245,3 +262,77 @@ body:hover #status, body.near #status, body.reveal #status { opacity: 1; }
 #dot.ok { background: var(--ok); }
 #dot.bad { background: var(--danger); }
 #dot.busy { background: var(--accent); animation: pulse .9s ease-in-out infinite; }
+
+/* Phone browser. web-shim.js adds .web: there is no hover and no window to
+   drag, and the controls have to clear the notch and the home indicator. */
+html.web, .web body {
+  background: radial-gradient(ellipse at 50% 35%, #262b38 0%, #14161c 70%);
+}
+.web #drag-strip,
+.web #btn-hide,
+.web #btn-quit,
+.web #btn-model,
+.web #btn-see { display: none !important; }
+.web #chrome { top: calc(env(safe-area-inset-top) + 8px); opacity: 1; }
+.web .chip { width: 36px; height: 36px; border-radius: 11px; }
+.web #bar { opacity: 1; bottom: calc(env(safe-area-inset-bottom) + 34px); }
+.web #bar button { width: 42px; height: 42px; border-radius: 13px; }
+/* iOS zooms the page when an input under 16px gets focus. */
+.web #input { font-size: 16px; }
+.web #status { opacity: 1; bottom: calc(env(safe-area-inset-bottom) + 8px); font-size: 12px; }
+
+/* What she heard, shown briefly above the input bar. */
+#heard {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 82px;
+  max-width: min(420px, calc(100% - 28px));
+  padding: 5px 11px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid rgba(255,255,255,.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--muted);
+  font-style: italic;
+  font-size: 12px;
+  z-index: 8;
+  transition: opacity .25s ease;
+}
+#heard.hidden { opacity: 0; pointer-events: none; }
+
+/* Stage view (Cmd+Shift+F): full screen on a backdrop, for showing her to a
+   room. Her reply becomes large subtitles; what she heard sits at the top. */
+html.stage, .stage body {
+  background: radial-gradient(ellipse at 50% 30%, #2a3040 0%, #161a23 55%, #0d0f14 100%);
+}
+.stage #drag-strip,
+.stage #btn-hide,
+.stage #btn-quit,
+.stage #btn-model { display: none !important; }
+.stage #chrome, .stage #bar, .stage #status { opacity: 1; }
+.stage #bubble {
+  top: auto;
+  bottom: 120px;
+  width: min(980px, calc(100% - 80px));
+  max-height: 30%;
+  padding: 16px 24px;
+  font-size: 24px;
+  line-height: 1.4;
+  text-align: center;
+  border-radius: 18px;
+  background: rgba(14, 16, 22, .78);
+}
+.stage #bubble.hidden { transform: translateX(-50%) translateY(8px); }
+.stage #heard {
+  top: 28px;
+  bottom: auto;
+  max-width: min(900px, calc(100% - 80px));
+  font-size: 19px;
+  padding: 9px 18px;
+  border-radius: 14px;
+}
+.stage #bar { width: min(560px, calc(100% - 80px)); bottom: 40px; }
+.stage #status { bottom: 14px; font-size: 12px; }
+.stage #notice { bottom: 110px; font-size: 15px; width: min(640px, calc(100% - 80px)); }

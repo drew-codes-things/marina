@@ -194,10 +194,24 @@ function writeState() {
 
 let ignoring = true;
 ipcMain.on('click-through', (_e, ignore) => {
-  if (!win || win.isDestroyed() || ignore === ignoring) return;
+  if (!win || win.isDestroyed() || stage || ignore === ignoring) return;
   ignoring = ignore;
   win.setIgnoreMouseEvents(ignore, { forward: true });
 });
+
+// Stage view: full screen on a solid backdrop, for turning the laptop round
+// to show her to people. The renderer paints the backdrop.
+let stage = false;
+
+function setStage(on) {
+  if (!win) return;
+  stage = !!on;
+  win.setSimpleFullScreen(stage);
+  win.setIgnoreMouseEvents(!stage, { forward: true });
+  ignoring = !stage;
+  win.webContents.send('set-stage', stage);
+  if (stage) { win.show(); win.focus(); }
+}
 
 function createWindow() {
   const saved = readState();
@@ -238,8 +252,8 @@ function createWindow() {
 
   ignoring = true;
 
-  win.on('moved', writeState);
-  win.on('resized', writeState);
+  win.on('moved', () => { if (!stage) writeState(); });
+  win.on('resized', () => { if (!stage) writeState(); });
   win.on('closed', () => { win = null; });
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -249,6 +263,17 @@ function createWindow() {
 }
 
 let openersOn = true;
+
+// The personalities the bridge offers, for the menu bar. Fetched when the
+// menu is about to show, since the bridge owns the current choice.
+let presetState = { preset: null, presets: [] };
+
+async function fetchPresets() {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/preset`, { signal: AbortSignal.timeout(1500) });
+    if (res.ok) presetState = await res.json();
+  } catch {}
+}
 
 function buildTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'trayTemplate.png'));
@@ -276,6 +301,24 @@ function buildTray() {
         },
       },
       { type: 'separator' },
+      ...presetState.presets.map((p) => ({
+        label: `${p.label} mode`,
+        type: 'radio',
+        checked: p.name === presetState.preset,
+        click: () => {
+          presetState.preset = p.name;
+          win?.webContents.send('set-preset', p.name);
+        },
+      })),
+      ...(presetState.presets.length ? [{ type: 'separator' }] : []),
+      {
+        label: 'Stage view (full screen)',
+        type: 'checkbox',
+        checked: stage,
+        accelerator: 'Command+Shift+F',
+        click: (item) => setStage(item.checked),
+      },
+      { type: 'separator' },
       { label: 'Change model…', click: () => { win?.show(); win?.webContents.send('pick-model'); } },
       { label: 'Reset position', click: () => { if (win) { win.setBounds({ x: 60, y: 60, width: 420, height: 680 }); win.show(); } } },
       { label: 'Reload', click: () => win?.reload() },
@@ -287,7 +330,8 @@ function buildTray() {
   };
 
   refresh();
-  tray.on('mouse-move', refresh);
+  tray.on('mouse-move', () => { refresh(); fetchPresets().then(refresh); });
+  fetchPresets().then(refresh);
   return refresh;
 }
 
@@ -306,6 +350,7 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+Shift+.', () => {
     win?.webContents.send('interrupt');
   });
+  globalShortcut.register('CommandOrControl+Shift+F', () => setStage(!stage));
   globalShortcut.register('CommandOrControl+Shift+Space', () => {
     win?.webContents.send('toggle-listen');
   });

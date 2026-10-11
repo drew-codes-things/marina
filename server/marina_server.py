@@ -43,6 +43,7 @@ from process.tts_func.engine import (
 from process.tts_func.engine import warmup as warmup_tts
 from process.text_func.speech import SentenceSplitter, split_reply
 from process import backend
+from process import config as cfg
 from process import idle
 from process.tools import registry as tools
 from process.memory import store as memory
@@ -90,6 +91,10 @@ def llm_error_message(e):
     if "rate_limit" in msg or "429" in msg:
         return "The endpoint rate-limited the request. Wait a moment and try again."
     if isinstance(e, APIConnectionError) or "Connection" in type(e).__name__:
+        if backend.mode() == "auto" and len(backend.BACKENDS) > 1:
+            tried = ", ".join(f"{b['label']} ({b['base_url'] or 'OpenAI'})"
+                              for b in backend.BACKENDS)
+            return f"None of Marina's brains answered. Tried {tried}."
         return (
             f"No language model answered at {describe_endpoint()}. Marina needs "
             "one to talk. Install Ollama and run 'ollama pull llama3.2:3b', or "
@@ -143,12 +148,14 @@ def health():
         "llm_endpoint": describe_endpoint(),
         "llm_using": active_endpoint(),
         "llm_mode": backend.mode(),
+        "llm_labels": backend.labels(),
+        "preset": cfg.preset(),
         "tts": describe_tts(),
         "whisper_loaded": _whisper is not None,
         "recording": recorder.is_recording,
         "memories": len(memory.all_facts()),
         "vision": VISION_MODEL if VISION_ENABLED else None,
-        "barge_in": BARGE_ENABLED,
+        "barge_in": _barge_enabled(),
         "idle": idle.status(),
     }
 
@@ -355,30 +362,44 @@ def listen_stop(speak: bool = True):
     return result
 
 
-@app.post("/listen/stop/stream")
-def listen_stop_stream():
-    def fail(message):
-        return StreamingResponse(
-            iter([_ndjson({"type": "error", "message": message})]),
-            media_type="application/x-ndjson")
+def _stream_error(message):
+    return StreamingResponse(
+        iter([_ndjson({"type": "error", "message": message})]),
+        media_type="application/x-ndjson")
 
-    path = recorder.stop()
-    if path is None:
-        return fail("Nothing recorded.")
 
+def _stream_transcript(path):
     try:
         transcript = transcribe_file(whisper(), path)
     finally:
         path.unlink(missing_ok=True)
 
     if not transcript:
-        return fail("Didn't catch that.")
+        return _stream_error("Didn't catch that.")
 
     print(f"[you] {transcript}", flush=True)
     idle.note_interaction()
     return StreamingResponse(
         _stream_reply(transcript, True, transcript=transcript),
         media_type="application/x-ndjson")
+
+
+@app.post("/listen/stop/stream")
+def listen_stop_stream():
+    path = recorder.stop()
+    if path is None:
+        return _stream_error("Nothing recorded.")
+    return _stream_transcript(path)
+
+
+@app.post("/voice/stream")
+def voice_stream(audio: UploadFile = File(...)):
+    """Like /listen/stop/stream, for a clip recorded somewhere else, such as
+    a phone's browser."""
+    suffix = Path(audio.filename or "clip.webm").suffix or ".webm"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(audio.file.read())
+    return _stream_transcript(Path(tmp.name))
 
 
 @app.post("/listen/cancel")
@@ -388,7 +409,12 @@ def listen_cancel():
 
 
 _barge = config.get("barge_in") or {}
-BARGE_ENABLED = bool(_barge.get("enabled", True))
+
+
+def _barge_enabled():
+    """Read on every call: presentation mode turns it off, since a busy room
+    would keep cutting her off."""
+    return bool(cfg.setting("barge_in", "enabled", True))
 
 
 def _make_vad():
@@ -457,7 +483,7 @@ def _barge_stream(timeout):
 
 @app.get("/barge/listen")
 def barge_listen(timeout: float = 45.0):
-    if not BARGE_ENABLED:
+    if not _barge_enabled():
         return StreamingResponse(
             iter([_ndjson({"type": "disabled"})]),
             media_type="application/x-ndjson")
@@ -529,16 +555,22 @@ def _list_models(base_url, api_key):
 
 @app.get("/models")
 def models_list():
-    from process.llm_funcs.llm_scr import (
-        API_KEY, BASE_URL, FALLBACK_BASE, FALLBACK_KEY,
-    )
-    return {
-        "server": _list_models(BASE_URL, API_KEY),
-        "local": _list_models(FALLBACK_BASE, FALLBACK_KEY),
+    from concurrent.futures import ThreadPoolExecutor
+    # Ask every backend at once, so one box that is off costs 4 seconds total
+    # rather than 4 seconds each.
+    with ThreadPoolExecutor(len(backend.BACKENDS)) as pool:
+        found = list(pool.map(
+            lambda b: _list_models(b["base_url"], b["api_key"]), backend.BACKENDS))
+    out = {b["name"]: m for b, m in zip(backend.BACKENDS, found)}
+    out.update({
+        "backends": [{"name": b["name"], "label": b["label"], "models": m}
+                     for b, m in zip(backend.BACKENDS, found)],
         "selected": backend.models(),
         "mode": backend.mode(),
         "current": backend.current(),
-    }
+        **_preset_info(),
+    })
+    return out
 
 
 class ModelIn(BaseModel):
@@ -579,6 +611,33 @@ def backend_set(body: BackendIn):
         return {"ok": False, "error": str(e), "mode": backend.mode()}
     print(f"[llm] backend switched to {backend.mode()}", flush=True)
     return {"ok": True, "mode": backend.mode(), "current": backend.current()}
+
+
+def _preset_info():
+    return {
+        "preset": cfg.preset(),
+        "presets": [{"name": n, "label": cfg.preset_label(n)} for n in cfg.presets()],
+    }
+
+
+@app.get("/preset")
+def preset_get():
+    return _preset_info()
+
+
+class PresetIn(BaseModel):
+    name: str
+
+
+@app.post("/preset")
+def preset_set(body: PresetIn):
+    try:
+        cfg.set_preset(body.name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e), **_preset_info()}
+    print(f"[config] personality switched to {cfg.preset_label(cfg.preset())}", flush=True)
+    return {"ok": True, **_preset_info(), "idle": idle.status(),
+            "barge_in": _barge_enabled()}
 
 
 class MemoryIn(BaseModel):
@@ -656,7 +715,7 @@ def _idle_stream(timeout):
 
 @app.get("/idle/listen")
 def idle_listen(timeout: float = 120.0):
-    if not idle.ENABLED:
+    if not idle.enabled():
         return StreamingResponse(iter([_ndjson({"type": "disabled"})]),
                                  media_type="application/x-ndjson")
     return StreamingResponse(_idle_stream(timeout),
@@ -673,6 +732,13 @@ def warmup():
     whisper()
     warmup_tts()
     return {"ok": True}
+
+
+_web = config.get("web") or {}
+if _web.get("enabled"):
+    # Last, because it mounts the avatar UI at / and would shadow later routes.
+    from process import web
+    web.mount(app, _web)
 
 
 if __name__ == "__main__":
