@@ -74,7 +74,8 @@ def system_message():
         "content": (config.system_prompt()
                     + (memory.as_prompt_block() if _recall() else "")
                     + tools.prompt_addition()
-                    + _stable_context()),
+                    + _stable_context()
+                    + (ambient.NOTE_EXPLAINED if ambient.ENABLED else "")),
     }
 
 
@@ -343,7 +344,9 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True):
     """
     history = _window(load_history())
     if user_input is not None:
-        history.append({"role": "user", "content": user_input})
+        # The clock goes on this message only, never into the saved history
+        # or the system prompt, so the cached prefix stays the same.
+        history.append({"role": "user", "content": user_input + ambient.as_note()})
 
     system = system_message()
     if extra_system:

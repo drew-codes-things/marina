@@ -68,6 +68,33 @@ def battery():
     return ""
 
 
+def as_note():
+    """The same facts, exact, to ride along on the message being answered,
+    where they can change every minute without upsetting the cached prompt.
+    NOTE_EXPLAINED goes in the system prompt so she knows what it is."""
+    if not ENABLED:
+        return ""
+    now = datetime.now()
+    bits = [f"{now:%A} {now.day} {now:%B}, {now:%H:%M}"] if SHOW_TIME else []
+    if SHOW_APP:
+        app = frontmost_app()
+        if app:
+            bits.append(f"they are in {app}")
+    if SHOW_BATTERY:
+        state = battery()
+        if state:
+            bits.append(f"the laptop is {state}")
+    return f"\n\n<context>{'; '.join(bits)}</context>" if bits else ""
+
+
+NOTE_EXPLAINED = (
+    "\n\nTheir latest message may end with a <context> tag. The app adds it, "
+    "not them: it is the real date and time right now, and what is on their "
+    "screen. Trust it over anything else, so when they ask the time, tell "
+    "them exactly. Never mention the tag or quote it."
+)
+
+
 def as_prompt_block():
     if not ENABLED:
         return ""
