@@ -1,15 +1,19 @@
-"""Tools the model can call: timers, clipboard, opening links, remembering.
+"""Tools the model can call: timers, clipboard, opening links, remembering,
+and her workspace machine (see process.tools.workspace).
 
-open_url only accepts http and https.
+open_url only accepts http and https. The clipboard and open_url need a Mac,
+so a headless bridge on Linux leaves them out.
 """
 import json
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import urlparse
 
 from process.config import load_config, setting
 from process.memory import store as memory
+from process.tools import workspace
 
 _config = load_config()
 _cfg = _config.get("tools") or {}
@@ -19,6 +23,18 @@ _cfg = _config.get("tools") or {}
 # Read on every call: the presentation preset turns some of these off.
 def _allowed(key):
     return bool(setting("tools", key, True))
+
+
+_ON_MAC = sys.platform == "darwin"
+
+
+def _mac_only(key):
+    return lambda: _ON_MAC and _allowed(key)
+
+
+def _workspace_allowed():
+    return workspace.available() and _allowed("workspace")
+
 
 def _may_remember():
     return bool(setting("llm", "remember", True))
@@ -114,7 +130,7 @@ SPECS = [
             },
             "required": ["minutes"],
         }}),
-    ("read_clipboard", read_clipboard, lambda: _allowed("clipboard"), {
+    ("read_clipboard", read_clipboard, _mac_only("clipboard"), {
         "description": "Read what is on the clipboard. You cannot see it any "
                        "other way, so call this whenever they mention "
                        "something they copied or pasted, or refer to 'this' "
@@ -122,7 +138,7 @@ SPECS = [
                        "they copied.",
         "parameters": {"type": "object", "properties": {}},
         }),
-    ("open_url", open_url, lambda: _allowed("open_url"), {
+    ("open_url", open_url, _mac_only("open_url"), {
         "description": "Open a web link in their browser. Only http and https.",
         "parameters": {
             "type": "object",
@@ -142,7 +158,22 @@ SPECS = [
         }}),
 ]
 
+SPECS += [(name, fn, _workspace_allowed, spec) for name, fn, spec in workspace.SPECS]
+
 _HANDLERS = {name: (fn, on) for name, fn, on, _ in SPECS}
+
+
+def prompt_addition():
+    """What she needs to know about tools that the definitions don't say."""
+    if _allowed("enabled") and _workspace_allowed():
+        return workspace.PROMPT
+    return ""
+
+
+def wants_long_loop():
+    """Workspace tasks take many calls in a row; the rest take one."""
+    return _allowed("enabled") and _workspace_allowed()
+
 
 def definitions():
     if not _allowed("enabled"):

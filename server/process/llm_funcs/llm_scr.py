@@ -73,8 +73,17 @@ def system_message():
         "role": "system",
         "content": (config.system_prompt()
                     + (memory.as_prompt_block() if _recall() else "")
+                    + tools.prompt_addition()
                     + _stable_context()),
     }
+
+
+def _tool_rounds():
+    """How many rounds of tool calls one reply may take before she has to
+    answer. Work on her machine is a chain of them: run, read, fix, rerun."""
+    if not tools.wants_long_loop():
+        return 1
+    return max(1, int(config.setting("llm", "max_tool_rounds", 12)))
 
 
 STICKY = float(_llm.get("fallback_sticky_seconds", 30))
@@ -345,8 +354,11 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True):
     messages = [system] + history
     offer = tools.definitions() if (use_tools and _tools_supported) else None
 
-    for attempt in range(2):
+    rounds = _tool_rounds()
+    done_rounds = 0
+    while True:
         calls = {}
+        said = []
         try:
             stream = (get_reply_stream(messages, tools=offer, tool_choice="auto")
                       if offer else get_reply_stream(messages))
@@ -358,6 +370,7 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True):
                 piece = getattr(delta, "content", None)
                 if not piece:
                     continue
+                said.append(piece)
                 yield piece
         except Exception as e:
             if offer is None or not _rejects_tools(e):
@@ -368,12 +381,12 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True):
             offer = None
             continue
 
-        if not calls:
+        if not calls or offer is None:
             return
 
         messages = messages + [{
             "role": "assistant",
-            "content": None,
+            "content": "".join(said) or None,
             "tool_calls": [
                 {"id": c["id"] or f"call_{i}", "type": "function",
                  "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
@@ -387,4 +400,7 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True):
                 "tool_call_id": call["id"] or f"call_{i}",
                 "content": result,
             })
-        offer = None
+        done_rounds += 1
+        if done_rounds >= rounds:
+            # Out of rounds: no more tools, so the next pass has to answer.
+            offer = None

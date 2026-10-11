@@ -24,7 +24,7 @@ def _clean(url):
 def _build():
     out = [{
         "name": "server",
-        "label": _llm.get("label") or "GPU server",
+        "label": _llm.get("label") or "Server",
         "base_url": _clean(_llm.get("base_url")),
         "api_key": _llm.get("api_key") or _config.get("OPENAI_API_KEY") or "not-needed",
         "model": _llm.get("model") or _config.get("model"),

@@ -86,6 +86,10 @@ Her config, memory and chat history live in
 - You can cut her off by talking over her
 - Sometimes says something without being asked
 - Timers, reading the clipboard, opening links, remembering things
+- Has her own Linux machine where she runs commands and edits code, so you
+  can build things with her instead of just talking about them
+- You can text her on Telegram, voice notes included, and she texts you
+  first now and then
 - Knows what day and time of day it is
 - Can look at your screen when you ask (off by default)
 - Lip sync with five mouth shapes
@@ -101,10 +105,74 @@ Her config, memory and chat history live in
 - Works with any OpenAI-compatible model: Ollama, llama.cpp, LM Studio, vLLM
   or OpenAI itself
 
+## Texting her
+
+Telegram is how she lives on your phone. It's a real chat: she shows as
+typing, splits what she says into separate texts, answers a voice note with
+a voice note in her own voice, and every so often messages you first.
+Timers you set while texting go off as texts.
+
+1. Message [@BotFather](https://t.me/BotFather), send `/newbot` and copy the
+   token it gives you.
+2. In the config of an always-on bridge, set `telegram.enabled: true` and
+   paste the token into `telegram.token`. Restart the bridge.
+3. Message your bot. It replies with your chat id. Put that in
+   `telegram.owner_chat_id` and restart again.
+
+Only that chat can talk to her; anyone else just gets told their chat id.
+`/reset` clears the conversation and `/quiet` stops her texting first until
+`/unquiet`. Run this on one bridge only, because two bridges polling the same
+bot steal each other's messages. Mine runs on the server next to her model,
+so she can text me when the Mac is asleep.
+
+## Her own machine
+
+Give her a Linux box (mine is a Debian VM) and she can actually do things on
+it: run commands, read and edit files, build and test code. Ask her to make
+you something and she will write it, run it, fix what breaks and tell you how
+it went. You can SSH into the same machine and pick up where she left off.
+
+Mine has a desktop as well (XFCE, reached over RustDesk), and logging in
+opens the terminal we share: `marina-tmux`, a tmux session where her
+commands scroll past in the top pane as she runs them and the bottom pane is
+mine. If I tell her to look at an error, she reads my pane. Over SSH it is
+`ssh -t marina@<host> marina-tmux`. The script is in
+[`server/workspace/marina-tmux`](server/workspace/marina-tmux); copy it to
+`/usr/local/bin` on the machine.
+
+She gets in with an SSH key of her own, so she can do exactly what that
+account can do, and taking it away is deleting one line from its
+`authorized_keys`. See `workspace:` in the config. Give her a machine you
+don't mind her breaking. The presentation preset turns it off so guests
+can't talk her into running things.
+
+## Running her brain on a server
+
+The bridge runs fine headless on Linux, which is how the Telegram side stays
+up. Mine is a Proxmox container with llama.cpp built for Vulkan, serving
+Qwen3.6 35B-A3B on a Ryzen 7 255's Radeon 780M iGPU. That model is a
+mixture of experts with only 3B parameters active per token, so it holds a
+conversation at a decent pace on hardware with no graphics card.
+
+```bash
+cmake -B build -DGGML_VULKAN=ON && cmake --build build -j --target llama-server
+llama-server -m Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --alias marina -ngl 999 -c 65536 -np 2 -fa on --jinja
+```
+
+The 780M only gets the RAM the kernel lets it map, so raise that with
+`amdgpu.gttsize=20480 ttm.pages_limit=5242880` on the kernel command line.
+The headless bridge needs `libportaudio2` and `libsndfile1` and the same
+`server/requirements-mac.txt`, and runs with `MARINA_ROOT` pointing at the
+code and `MARINA_DATA` at a writable folder for its config and memory.
+
   ## Clipboard
 
 - The clipboard tool sends whatever is on your clipboard to the model, so it's
   only as private as your LLM endpoint. Turn it off with `tools.clipboard`.
+- Texting goes through Telegram's servers, and bot chats are not end-to-end
+  encrypted, so anything you text her, voice notes included, is readable by
+  Telegram. The voice notes are transcribed and spoken on your own bridge,
+  not by Telegram, but the audio still passes through them.
 - `asr.offline: true` stops Faster-Whisper checking Hugging Face for model
   updates every time it loads.
 
@@ -230,6 +298,8 @@ server/
     idle.py                   when she says something unprompted
     tools/context.py          time, frontmost app, battery
     tools/registry.py         timers, clipboard, links, remembering
+    tools/workspace.py        commands and files on her own machine, over SSH
+    telegram.py               texting her, voice notes, texting first
     vision/look.py            screenshot to vision model
     memory/store.py           durable facts, deduped and capped
     memory/extract.py         decides what is worth remembering

@@ -1,0 +1,17 @@
+#!/bin/sh
+# The terminal you share with Marina. Her commands scroll past in the top
+# pane as she runs them; the bottom pane is your shell, which she can read
+# when you ask her to look at it. Run it again from anywhere to rejoin.
+mkdir -p ~/.marina ~/projects
+touch ~/.marina/terminal.log
+if ! tmux has-session -t marina 2>/dev/null; then
+  tmux new-session -d -s marina -n work -x 200 -y 50 -c ~/projects \
+    "printf \"\\033]2;marina\\033\\\\\"; tail -n 300 -F ~/.marina/terminal.log 2>/dev/null"
+  tmux split-window -v -l 40% -t marina:work -c ~/projects
+  tmux set -t marina pane-border-status top
+  tmux set -t marina pane-border-format " #{?pane_index,you,marina} "
+  tmux set -t marina mouse on
+  tmux set -t marina history-limit 20000
+  tmux select-pane -t marina:work.1
+fi
+exec tmux attach -t marina

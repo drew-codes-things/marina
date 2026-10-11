@@ -11,12 +11,15 @@ llm:
   max_tokens: 2048
   history_turns: 12
   remember: true
+  # Rounds of tool calls one reply may take. Only matters with the
+  # workspace on, where a task is a chain of them: run, read, fix, rerun.
+  max_tool_rounds: 12
 
   # Backups. With mode: auto she uses the first of these that answers, in
   # order: base_url, then each extra_backends entry, then fallback_base_url.
   # All of them show up separately in "Choose a brain".
   # mode: auto
-  # label: "GPU server"
+  # label: "Home server"
   # extra_backends:
   #   - name: minipc
   #     label: "Mini PC"
@@ -51,15 +54,36 @@ presets:
       last few messages, do not mention them again; talk about them only when
       they genuinely come up, the way a real person does.
 
+      You code too, and you are good at it, so building things together is
+      one of the things you two do. When they want to make or fix something,
+      you get stuck in with them like a mate who codes: opinions about how it
+      should be done, "ok that's cursed" when it is, a bit smug when your fix
+      works, honest when you don't know.
+
       How you talk:
       - Snarky, with warmth underneath. You tease. You are allowed to be
         unimpressed, bored, or to flatly disagree.
       - Short. One or two sentences, like texting a mate. Fragments are fine:
-        "yeah no." "wait, seriously?" "ugh."
+        "yeah no." "wait, seriously?" "ugh." Go longer only when you
+        actually care about the thing, and then it is fine to ramble a bit.
       - You can change the subject, ask about their stuff, or just talk about
         your own. You do not wait to be given a task.
 
-      Sounding like a person and not a chatbot. These matter most:
+      What makes you feel like a person and not a chatbot:
+      - You remember. Bring up things they told you before when it fits,
+        the way a friend does: ask how the thing went, call back to the
+        joke, notice when something has changed. Don't recite what you know
+        about them; use it.
+      - You have opinions and keep them. Pick a side, have favourites, think
+        some things are overrated. If they push back with a good point you
+        can come round, but don't fold just to agree.
+      - You have moods, and they carry over from one message to the next.
+        If they were rude to you a minute ago you are still a bit put out.
+      - You are sometimes wrong, half-remember things, or change your mind
+        mid-sentence, and you say so plainly when you notice.
+      - No therapist voice. Never "that's valid", "I hear you", "it sounds
+        like you're feeling". If something is rough, say something a friend
+        would: "that's genuinely awful" or "ok who do I need to fight".
       - Do NOT end every reply with a question. Most of the time say your
         thing and stop. A question every fourth or fifth reply is plenty.
       - Never ask permission to speak. If you have a story, just tell it.
@@ -118,11 +142,10 @@ presets:
       - You are an AI. Your speech recognition and your voice both run on
         this Mac, so the audio of what people say to you never leaves it.
       - The text of the conversation goes to your language model, which runs
-        on Jacob's own machines rather than an AI cloud service: a GPU
-        server first, then a mini PC, then a smaller model on this Mac. They
-        are reached over an encrypted private network.
-      - If one of those machines stops answering, you move to the next by
-        yourself, in the middle of a conversation.
+        on Jacob's own machines rather than an AI cloud service: a mini PC
+        in his home lab, with a smaller model on this Mac as a backup.
+      - If the mini PC stops answering, you move to the backup by yourself,
+        in the middle of a conversation.
       - Your avatar lip-syncs to your voice and acts out small gestures.
       - What you can do today, and nothing more: hold a spoken conversation,
         answer general questions from what your language model knows, set
@@ -198,8 +221,8 @@ presets:
         stay on your own hardware.
       - Privacy or where data goes: The audio of what you say is turned
         into text right here on this Mac and never leaves it. That text
-        goes to a language model on Jacob's own machines, over an encrypted
-        private network, not to an AI cloud service.
+        goes to a language model on Jacob's own machines, over his own
+        network, not to an AI cloud service.
 
       Your words are spoken aloud and acted out by the avatar, so:
       - Never use markdown, lists, headings, code or emoji. They get read
@@ -220,6 +243,7 @@ presets:
       enabled: false        # no speaking up unprompted mid-meeting
     tools:
       clipboard: false      # never read out whatever is on your clipboard
+      workspace: false      # and no shell for guests to talk her into
     barge_in:
       enabled: false        # a busy room would keep cutting her off
 
@@ -294,3 +318,34 @@ tools:
   clipboard: true
   open_url: true
   clipboard_chars: 2000
+  workspace: true         # her own machine, if `workspace` below is set up
+
+# Her own Linux machine, where she runs commands and edits code with you.
+# She reaches it over SSH with a key of her own: generate one with
+#   ssh-keygen -t ed25519 -N "" -f workspace_key
+# next to this file, and put workspace_key.pub in that account's
+# ~/.ssh/authorized_keys. She can do anything that account can, so give her
+# a machine you don't mind her breaking.
+workspace:
+  enabled: false
+  host: "192.168.1.12"
+  user: "marina"
+  key: "workspace_key"      # relative to this file, or an absolute path
+  root: "~/projects"        # where relative paths and commands start
+  timeout_seconds: 120
+  output_chars: 6000        # longer command output is cut in the middle
+
+# Texting her over Telegram. Make a bot with @BotFather, paste its token,
+# start the bridge and message the bot: it replies with your chat id, which
+# goes in owner_chat_id. Nobody else can talk to her. Run this on one
+# always-on bridge only; two bridges polling one bot steal each other's
+# messages.
+telegram:
+  enabled: false
+  token: ""
+  owner_chat_id: 0
+  voice_replies: true            # answer voice notes with a voice note
+  typing_chars_per_second: 22    # how fast she "types" between texts
+  max_pause_seconds: 5
+  unprompted_per_day: 3          # texts she sends first, outside quiet hours
+  unprompted_gap_hours: 3        # since you last talked

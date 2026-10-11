@@ -1,4 +1,5 @@
 faster-whisper>=1.0.3     # ASR (ctranslate2 + av; CPU only, no torch)
+av<19                     # 19 dropped an argument faster-whisper 1.2 passes
 openai>=1.40              # LLM client - also speaks to Ollama/llama.cpp
 requests>=2.31            # HTTP
 PyYAML>=6.0               # config

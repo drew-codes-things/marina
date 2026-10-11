@@ -1844,7 +1844,7 @@ window.marina.onSetOpeners?.((on) => {
 let brainMode = 'auto';
 let personality = { preset: 'default', presets: [] };
 // Filled in from the bridge; these are only what to show before it answers.
-let brainLabels = { server: 'GPU server', local: 'This Mac' };
+let brainLabels = { server: 'Server', local: 'This Mac' };
 let brainOrder = ['server', 'local'];
 
 function brainLabel(name) { return brainLabels[name] || name || '?'; }

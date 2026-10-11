@@ -744,6 +744,10 @@ if _web.get("enabled"):
 if __name__ == "__main__":
     import uvicorn
 
+    from process import telegram
+    telegram.start(transcribe=lambda path: transcribe_file(whisper(), path),
+                   synthesize=synthesize)
+
     bridge = config.get("bridge", {})
     uvicorn.run(
         app,
