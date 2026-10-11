@@ -1505,18 +1505,26 @@ async function* readEvents(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) yield JSON.parse(line);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) yield JSON.parse(line);
+      }
     }
+    if (buf.trim()) yield JSON.parse(buf.trim());
+  } finally {
+    // Leaving a for-await early must close the stream too. Otherwise the
+    // connection stays open until the bridge's own timeout, and Chromium
+    // only allows six to one host: a few abandoned long polls and the next
+    // message waits in line for a minute or more.
+    reader.cancel().catch(() => {});
   }
-  if (buf.trim()) yield JSON.parse(buf.trim());
 }
 
 let inflight = null;
@@ -1691,6 +1699,9 @@ function disarmBargeIn(req) {
   if (req?.barge && !req.tookOver) {
     try { req.barge.abort(); } catch {}
     req.barge = null;
+    // The bridge can't tell the request went away, so tell it to let go of
+    // the mic.
+    post('/barge/stop').catch(() => {});
   }
 }
 

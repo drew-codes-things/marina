@@ -576,6 +576,10 @@ def _make_vad():
 def _barge_stream(timeout):
     """Listen while she talks. If the user cuts in, transcribe it and stream
     the next reply on the same connection."""
+    # A barge listen whose client went away keeps the mic until it is
+    # garbage collected, so a new one takes it over instead of failing.
+    if recorder.is_monitoring:
+        recorder.cancel()
     started = recorder.start(_make_vad())
     if not started:
         yield _ndjson({"type": "error", "message": "Microphone already in use."})
@@ -635,6 +639,16 @@ def barge_listen(timeout: float = 45.0):
     threading.Thread(target=whisper, daemon=True).start()
     return StreamingResponse(_barge_stream(timeout),
                              media_type="application/x-ndjson")
+
+
+@app.post("/barge/stop")
+def barge_stop():
+    """The app stopped listening for interruptions: release the mic now
+    rather than when the abandoned stream is collected."""
+    stopped = recorder.is_monitoring
+    if stopped:
+        recorder.cancel()
+    return {"ok": True, "stopped": stopped}
 
 
 class SeeIn(BaseModel):
