@@ -3,6 +3,7 @@
     python server/marina_server.py
 """
 import base64
+import hmac
 import json
 import queue
 import sys
@@ -15,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "server"))
 
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIConnectionError
 from pydantic import BaseModel
@@ -28,7 +29,10 @@ from process.config import CONFIG_PATH, load_config
 from process.llm_funcs.llm_scr import (
     active_endpoint,
     active_model,
+    append_local,
     describe_endpoint,
+    load_local_history,
+    reset_local_history,
     llm_response,
     llm_stream,
     note_exchange,
@@ -44,6 +48,7 @@ from process.tts_func.engine import (
 from process.tts_func.engine import warmup as warmup_tts
 from process.text_func.speech import SentenceSplitter, split_reply
 from process import backend
+from process import shared
 from process import config as cfg
 from process import idle
 from process.tools import registry as tools
@@ -823,6 +828,78 @@ def memory_delete(fact_id: str):
 @app.delete("/memory")
 def memory_clear():
     memory.clear()
+    return {"ok": True}
+
+
+# Her memory and the personal conversation, served to the other bridges
+# (see process.shared). Only reachable from the network with the token.
+
+_LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+@app.middleware("http")
+async def shared_guard(request, call_next):
+    if shared.SERVE_TOKEN:
+        client = request.client.host if request.client else ""
+        if client not in _LOCAL_CLIENTS:
+            sent = request.headers.get("authorization", "")
+            ok = (request.url.path.startswith("/shared/")
+                  and hmac.compare_digest(sent, f"Bearer {shared.SERVE_TOKEN}"))
+            if not ok:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+    return await call_next(request)
+
+
+class SharedFactIn(BaseModel):
+    text: str
+    source: str = "auto"
+
+
+class SharedTurnIn(BaseModel):
+    messages: list[dict]
+
+
+@app.get("/shared/memory")
+def shared_memory():
+    return memory.local_facts()
+
+
+@app.post("/shared/memory")
+def shared_memory_add(body: SharedFactIn):
+    fact = memory.local_add(body.text, source=body.source)
+    if fact:
+        print(f"[memory] +{fact['text']} (from another bridge)", flush=True)
+    return {"fact": fact}
+
+
+@app.delete("/shared/memory/{fact_id}")
+def shared_memory_remove(fact_id: str):
+    return {"ok": memory.local_remove(fact_id)}
+
+
+@app.delete("/shared/memory")
+def shared_memory_clear():
+    memory.local_clear()
+    return {"ok": True}
+
+
+@app.get("/shared/history")
+def shared_history():
+    return load_local_history()
+
+
+@app.post("/shared/history")
+def shared_history_add(body: SharedTurnIn):
+    msgs = [{"role": m["role"], "content": m["content"]} for m in body.messages
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+    if msgs:
+        append_local(msgs)
+    return {"ok": True, "added": len(msgs)}
+
+
+@app.delete("/shared/history")
+def shared_history_clear():
+    reset_local_history()
     return {"ok": True}
 
 

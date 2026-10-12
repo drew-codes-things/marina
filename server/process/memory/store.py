@@ -9,6 +9,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 
+from process import shared
 from process.config import resolve_data
 
 MEMORY_FILE = resolve_data("memory.json")
@@ -63,8 +64,19 @@ def save(data):
     tmp.replace(MEMORY_FILE)
 
 
-def all_facts():
+def local_facts():
     return load()["facts"]
+
+
+def all_facts():
+    """Every fact, from the shared home if there is one."""
+    if shared.enabled():
+        facts = shared.call("GET", "/shared/memory")
+        if isinstance(facts, list):
+            with _lock:
+                save({"facts": facts})  # the copy used if the home is down
+            return facts
+    return local_facts()
 
 
 _INSTRUCTION = re.compile(
@@ -94,7 +106,16 @@ def _is_durable_fact(text):
 
 
 def add(text, source="auto"):
-    """Store a fact. Returns the fact, or None if it duplicates an existing one."""
+    """Store a fact, in the shared home if there is one. Returns the fact,
+    or None if it duplicates an existing one."""
+    if shared.enabled():
+        out = shared.call("POST", "/shared/memory", {"text": text, "source": source})
+        if isinstance(out, dict):
+            return out.get("fact")
+    return local_add(text, source)
+
+
+def local_add(text, source="auto"):
     text = " ".join((text or "").split())
     if not _is_durable_fact(text):
         return None
@@ -127,6 +148,14 @@ def add(text, source="auto"):
 
 
 def remove(fact_id):
+    if shared.enabled():
+        out = shared.call("DELETE", f"/shared/memory/{fact_id}")
+        if isinstance(out, dict):
+            return bool(out.get("ok"))
+    return local_remove(fact_id)
+
+
+def local_remove(fact_id):
     with _lock:
         data = load()
         before = len(data["facts"])
@@ -136,6 +165,12 @@ def remove(fact_id):
 
 
 def clear():
+    if shared.enabled():
+        shared.call("DELETE", "/shared/memory")
+    local_clear()
+
+
+def local_clear():
     with _lock:
         save({"facts": []})
 

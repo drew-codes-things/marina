@@ -2,6 +2,7 @@
 import json
 import re
 import threading
+from datetime import datetime
 
 from process.memory import store
 
@@ -18,7 +19,9 @@ DO NOT RECORD:
 - passing context: questions, requests, opinions, greetings, thanks
 - file names, model names or app names treated as personal details
 
-Write each fact as one short sentence starting with "The user".
+Write each fact as one short sentence starting with "The user". Turn
+relative dates into real ones using today's date, so "my birthday was
+yesterday" is stored as the actual day, never as "yesterday".
 Reply with ONLY a JSON array of strings. No prose, no markdown, no fences.
 
 user: "my beelink has 32 gigs of ram"
@@ -26,6 +29,9 @@ user: "my beelink has 32 gigs of ram"
 
 user: "i'm building a vtuber assistant"
 ["The user is building a VTuber assistant"]
+
+user: "it was my birthday yesterday" (today is Monday 12 October 2026)
+["The user's birthday is on 11 October"]
 
 user: "call me Sam"
 ["The user prefers to be called Sam"]
@@ -90,7 +96,8 @@ def extract(client, model, user_text, assistant_text):
             messages=[
                 {"role": "system", "content": PROMPT},
                 {"role": "user",
-                 "content": f"USER SAID: {user_text}\n\nYOU REPLIED: {assistant_text}"},
+                 "content": f"TODAY IS {datetime.now():%A %-d %B %Y}.\n\n"
+                            f"USER SAID: {user_text}\n\nYOU REPLIED: {assistant_text}"},
             ],
             temperature=0,
             max_tokens=200,

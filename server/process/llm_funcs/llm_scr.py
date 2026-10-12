@@ -18,6 +18,7 @@ from process.backend import mode as backend_mode
 from process.backend import model_for
 from process.backend import note_used
 from process import config
+from process import shared
 from process.config import load_config, resolve_data
 from process.memory import extract as memory_extract
 from process.memory import persona
@@ -200,7 +201,24 @@ def _flatten(message):
     return {"role": message["role"], "content": str(content)}
 
 
+def _shared_history():
+    """Only the personal conversation is shared. A presentation keeps its
+    own, so guests never see what you texted her."""
+    return shared.enabled() and config.preset() == "default"
+
+
 def load_history():
+    """The conversation, from the shared home if there is one."""
+    if _shared_history():
+        msgs = shared.call("GET", "/shared/history")
+        if isinstance(msgs, list):
+            history = [_flatten(m) for m in msgs if isinstance(m, dict) and "role" in m]
+            save_history(history)  # the copy used if the home is down
+            return [m for m in history if m["role"] != "system"]
+    return load_local_history()
+
+
+def load_local_history():
     path = _history_file()
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -245,21 +263,41 @@ def _extract_backend():
     return c, model
 
 
+def append_local(messages):
+    """Add messages to this bridge's own conversation file."""
+    with _history_lock:
+        history = _window(load_local_history())
+        history.extend(messages)
+        save_history(history)
+
+
+def append_history(messages):
+    """Add messages to the conversation. Appending, rather than saving the
+    whole thing, is what lets the desktop and Telegram both write to the
+    shared one without either losing what the other just said."""
+    if _shared_history():
+        if shared.call("POST", "/shared/history", {"messages": messages}) is not None:
+            return
+    append_local(messages)
+
+
 def save_turn(user_text, assistant_text):
     assistant_text = (assistant_text or "").strip()
     if not assistant_text:
         return
-    with _history_lock:
-        history = _window(load_history())
-        if user_text is not None:
-            history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": assistant_text})
-        save_history(history)
+    turn = [] if user_text is None else [{"role": "user", "content": user_text}]
+    append_history(turn + [{"role": "assistant", "content": assistant_text}])
     if _remember() and user_text is not None:
         memory_extract.remember_async(*_extract_backend(), user_text, assistant_text)
 
 
 def reset_history():
+    if _shared_history():
+        shared.call("DELETE", "/shared/history")
+    reset_local_history()
+
+
+def reset_local_history():
     path = _history_file()
     if os.path.exists(path):
         os.remove(path)
@@ -276,10 +314,8 @@ def get_reply(messages):
 
 def note_exchange(user_text, assistant_text):
     """Save a turn that didn't come from the chat model, e.g. a screen look."""
-    history = _window(load_history())
-    history.append({"role": "user", "content": user_text})
-    history.append({"role": "assistant", "content": assistant_text})
-    save_history(history)
+    append_history([{"role": "user", "content": user_text},
+                    {"role": "assistant", "content": assistant_text}])
 
 
 def llm_response(user_input):
@@ -289,8 +325,8 @@ def llm_response(user_input):
     completion = get_reply([system_message()] + history)
     reply = (completion.choices[0].message.content or "").strip()
 
-    history.append({"role": "assistant", "content": reply})
-    save_history(history)
+    append_history([{"role": "user", "content": user_input},
+                    {"role": "assistant", "content": reply}])
 
     if _remember():
         memory_extract.remember_async(*_extract_backend(), user_input, reply)

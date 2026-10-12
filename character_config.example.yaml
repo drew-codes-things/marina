@@ -368,3 +368,13 @@ telegram:
   max_pause_seconds: 5
   unprompted_per_day: 3          # texts she sends first, outside quiet hours
   unprompted_gap_hours: 3        # since you last talked
+
+# One memory and one personal conversation across bridges, e.g. the desktop
+# and an always-on server that does Telegram. On the server ("home"), set
+# serve_token and bridge.host: "0.0.0.0"; from the network it then only
+# answers /shared/ requests that carry the token. On the others, set url and
+# token to the same value. Presentation mode always keeps its own.
+shared:
+  url: ""            # e.g. "http://192.168.1.15:8765", on the others
+  token: ""          # on the others
+  serve_token: ""    # on the home bridge
