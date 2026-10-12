@@ -366,14 +366,51 @@ def llm_response(user_input):
     return reply
 
 
-def get_reply_stream(messages, **kw):
-    return chat_completion(
-        messages,
-        temperature=_temperature(),
-        max_tokens=MAX_TOKENS,
-        stream=True,
-        **kw,
-    )
+# Once she is using tools she is working, not chatting: steadier sampling,
+# no penalty on repeating herself (typing exact text, writing JSON), and
+# room to think before each step. Her first round, and so every ordinary
+# chat, keeps her personality settings.
+WORK_TEMPERATURE = float(_llm.get("work_temperature", 0.6))
+WORK_THINKING = bool(_llm.get("think_while_working", True))
+WORK_MAX_TOKENS = int(_llm.get("work_max_tokens", 4096))
+
+
+def _work_settings():
+    extra = {"top_k": 20, "repeat_penalty": 1.0}
+    if WORK_THINKING:
+        extra["chat_template_kwargs"] = {"enable_thinking": True}
+    return {"temperature": WORK_TEMPERATURE, "top_p": 0.8, "frequency_penalty": 0.0,
+            "max_tokens": WORK_MAX_TOKENS, "extra_body": extra}
+
+
+KEEP_FULL_RESULTS = 4
+OLD_RESULT_CHARS = 300
+# Shortening changes text the server has cached, so it rereads from there;
+# only worth it once a job has grown big (about 15K tokens).
+SHORTEN_FROM_CHARS = 60000
+
+
+def _shorten_old_results(messages):
+    """On a long job, keep only the latest few tool results in full. Older
+    screen descriptions and command output are out of date anyway, and
+    carrying them all fills her context until she loses the thread."""
+    if sum(len(str(m.get("content") or "")) for m in messages) < SHORTEN_FROM_CHARS:
+        return messages
+    results = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    old = set(results[:-KEEP_FULL_RESULTS])
+    out = []
+    for i, m in enumerate(messages):
+        text = m.get("content") or ""
+        if i in old and len(text) > OLD_RESULT_CHARS:
+            m = {**m, "content": text[:OLD_RESULT_CHARS] + " … (older result, shortened)"}
+        out.append(m)
+    return out
+
+
+def get_reply_stream(messages, working=False, **kw):
+    settings = _work_settings() if working else {
+        "temperature": _temperature(), "max_tokens": MAX_TOKENS}
+    return chat_completion(messages, stream=True, **settings, **kw)
 
 
 def _collect_tool_calls(delta, calls):
@@ -404,6 +441,20 @@ def _rejects_tools(e):
     return "tool" in body or "function" in body or e.status_code in (404, 501)
 
 
+def _merge_her_runs(history):
+    """Several of her messages in a row (texts they haven't answered yet)
+    become one, as servers only accept one assistant turn at a time."""
+    out = []
+    for m in history:
+        if (out and m.get("role") == "assistant" == out[-1].get("role")
+                and not m.get("tool_calls") and not out[-1].get("tool_calls")
+                and isinstance(m.get("content"), str) and isinstance(out[-1].get("content"), str)):
+            out[-1] = {**out[-1], "content": out[-1]["content"] + "\n\n" + m["content"]}
+        else:
+            out.append(m)
+    return out
+
+
 def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None):
     """Yield reply text as it arrives. The caller saves the turn with
     `save_turn`, since only it knows how much was actually spoken.
@@ -422,6 +473,14 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
         else:
             content = user_input + note
         history.append({"role": "user", "content": content})
+    else:
+        # Speaking up unprompted. Servers refuse a conversation that ends on
+        # her own message, so the app's nudge goes in as a turn of its own
+        # (never saved), after her earlier unanswered messages run together.
+        history = _merge_her_runs(history)
+        history.append({"role": "user", "content":
+                        "(No new message from them; the app is giving you a chance "
+                        "to speak first.)" + ambient.as_note()})
 
     system = system_message()
     if extra_system:
@@ -441,8 +500,9 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
         calls = {}
         said = []
         try:
-            stream = (get_reply_stream(messages, tools=offer, tool_choice="auto")
-                      if offer else get_reply_stream(messages))
+            working = done_rounds > 0
+            stream = (get_reply_stream(messages, working, tools=offer, tool_choice="auto")
+                      if offer else get_reply_stream(messages, working))
             for event in stream:
                 if not event.choices:
                     continue
@@ -511,6 +571,7 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
                 "content": result,
             })
         done_rounds += 1
+        messages = _shorten_old_results(messages)
         # Nothing to say, but a chance for the caller to notice it was hung
         # up on; without it a long run of tool calls never yields, and she
         # would carry on working for nobody.

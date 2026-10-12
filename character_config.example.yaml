@@ -8,6 +8,12 @@ llm:
   repeat_penalty: 1.12
   frequency_penalty: 0.35
   temperature: 1.0
+  # Once she starts using tools in a reply she's working, not chatting: these
+  # replace temperature and the penalties above until she's done, and with a
+  # thinking model (Qwen3, Gemma 4) she reasons privately before each step.
+  work_temperature: 0.6
+  think_while_working: true
+  work_max_tokens: 4096
   max_tokens: 2048
   history_turns: 12
   remember: true

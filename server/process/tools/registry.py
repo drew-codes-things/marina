@@ -210,8 +210,17 @@ def prompt_addition():
     """What she needs to know about tools that the definitions don't say."""
     if not _allowed("enabled"):
         return ""
-    return ((workspace.PROMPT if _workspace_allowed() else "")
-            + (mac.PROMPT if _mac_allowed() else ""))
+    machines = ((workspace.PROMPT if _workspace_allowed() else "")
+                + (mac.PROMPT if _mac_allowed() else ""))
+    return machines + (WORKING if machines else "")
+
+
+WORKING = """
+
+While you're working on a machine, between one tool call and the next, you
+don't need to perform: say nothing, or a few plain words about what you're
+doing. Save your voice and personality for when you're done and talk to
+them about how it went, which should sound like you."""
 
 
 def wants_long_loop():

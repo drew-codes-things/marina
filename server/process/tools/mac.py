@@ -266,9 +266,10 @@ def _screen_points():
     return r.w, r.h
 
 
-def _capture_without_her(path):
-    """Write the main display to `path` as JPEG, leaving out her own window
-    so her avatar doesn't cover what she's looking at. False if it can't."""
+def _capture_without_her(path, rect=None):
+    """Write the main display (or `rect` of it, in points) to `path` as JPEG,
+    leaving out her own window so her avatar doesn't cover what she's
+    looking at. False if it can't."""
     windows = _windows(desktop=True)
     keep = [w["number"] for w in windows if w["owner"] != "Marina" and w["number"]]
     if len(keep) == len(windows):
@@ -293,10 +294,10 @@ def _capture_without_her(path):
     io.CGImageDestinationFinalize.restype = c.c_bool
     io.CGImageDestinationFinalize.argtypes = [vp]
 
-    w, h = _screen_points()
+    x, y, w, h = rect or (0, 0, *_screen_points())
     ids = (vp * len(keep))(*keep)
     array = cf.CFArrayCreate(None, ids, len(keep), None)
-    image = cg.CGWindowListCreateImageFromArray(_CGRect(0, 0, w, h), array, 0)
+    image = cg.CGWindowListCreateImageFromArray(_CGRect(x, y, w, h), array, 0)
     cf.CFRelease(array)
     if not image:
         return False
@@ -315,18 +316,31 @@ def _capture_without_her(path):
     return bool(ok)
 
 
-def _screenshot():
-    """(base64 JPEG, image width, image height) of the main display."""
+def _front_window():
+    """(app, (x, y, w, h)) of the front app's main window, or None."""
+    front = _frontmost()
+    for w in _windows():
+        bx, by, bw, bh = w["bounds"]
+        if w["layer"] == 0 and front and _same_app(w["owner"], front) and bw > 200 and bh > 150:
+            return front, (bx, by, bw, bh)
+    return None
+
+
+def _screenshot(rect=None):
+    """(base64 JPEG, image width, image height) of the main display, or of
+    `rect` of it in points."""
     fd, path = tempfile.mkstemp(suffix=".jpg")
     os.close(fd)
     try:
         try:
-            captured = _capture_without_her(path)
+            captured = _capture_without_her(path, rect)
         except (OSError, ValueError, AttributeError) as e:
             print(f"[mac] capture without her window failed ({e}); using screencapture", flush=True)
             captured = False
         if not captured:
-            subprocess.run(["screencapture", "-x", "-m", "-t", "jpg", path], check=True, timeout=15)
+            region = ["-R", ",".join(str(int(v)) for v in rect)] if rect else ["-m"]
+            subprocess.run(["screencapture", "-x", *region, "-t", "jpg", path],
+                           check=True, timeout=15)
         subprocess.run(["sips", "-Z", "1600", "-s", "formatOptions", "75", path],
                        capture_output=True, timeout=15)
         size = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
@@ -356,13 +370,28 @@ passwords, codes or private messages in detail. Plain sentences, no
 markdown, under 150 words.{question}"""
 
 
-def mac_look(question=""):
+WINDOW_PROMPT = """This is a close-up of the front window of {app} on their Mac. Read
+it carefully and describe it plainly and accurately, for your own use: what
+the window is, and the text in it that matters, quoted exactly as written,
+symbols, accents and emoji included. Don't read out passwords, codes or
+private messages in detail. Plain sentences, no markdown, under 150
+words.{question}"""
+
+
+def mac_look(question="", whole_screen=False):
     if not can_see():
         return _NO_SCREEN
     try:
-        image, _w, _h = _screenshot()
         ask = f"\n\nIn particular: {question.strip()}" if (question or "").strip() else ""
-        reply = _vision(LOOK_PROMPT.format(question=ask), image)
+        front = None if whole_screen else _front_window()
+        if front:
+            # The front window alone, at full detail: small text in a
+            # document is easy to misread on a shrunk whole-screen shot.
+            image, _w, _h = _screenshot(front[1])
+            reply = _vision(WINDOW_PROMPT.format(app=front[0], question=ask), image)
+        else:
+            image, _w, _h = _screenshot()
+            reply = _vision(LOOK_PROMPT.format(question=ask), image)
     except Exception as e:
         return f"Looking failed: {type(e).__name__}: {str(e)[:200]}"
     print("[mac] looked at the screen", flush=True)
@@ -552,6 +581,8 @@ def mac_type(text, app=""):
                 return (f"Stopped after {n} of {len(text)} characters: {_frontmost() or 'another app'} "
                         f"came to the front instead of {target}. Look at the screen, then "
                         "carry on from where it stopped.")
+            if not ch.isascii():
+                time.sleep(0.06)  # and let the plain ones before it land first
             units = ch.encode("utf-16-le")
             buf = (ctypes.c_uint16 * (len(units) // 2)).from_buffer_copy(units)
             for pressed in (True, False):
@@ -561,7 +592,10 @@ def mac_type(text, app=""):
                 # each letter into one (cmd+h hides the app she's typing into).
                 cg.CGEventSetFlags(event, 0)
                 post(event)
-            time.sleep(0.008)
+            # Some apps (LibreOffice) handle accented letters, symbols and
+            # emoji by a slower path than plain ones, so a fast run of keys
+            # lands out of order ("Zoë" became "ëZo"). Let each one settle.
+            time.sleep(0.008 if ch.isascii() else 0.06)
     except PermissionError as e:
         return str(e)
     except Exception as e:
@@ -899,11 +933,14 @@ def needs_ok(name, args, consented):
 
 SPECS = [
     ("mac_look", mac_look, {
-        "description": "Take a screenshot of their Mac's screen and look at it. Use it "
-                       "before working in one of their apps, and after doing something "
-                       "to check it worked. You can't see their screen otherwise.",
+        "description": "Look at their Mac: by default a close-up of the front app's "
+                       "window, good for reading what's in a document; whole_screen for "
+                       "everything that's open. Use it before working in one of their "
+                       "apps, and after doing something to check it worked. You can't "
+                       "see their screen otherwise.",
         "parameters": {"type": "object", "properties": {
-            "question": {"type": "string", "description": "What you want to check."}}}}),
+            "question": {"type": "string", "description": "What you want to check."},
+            "whole_screen": {"type": "boolean"}}}}),
     ("mac_apps", mac_apps, {
         "description": "List the apps open on their Mac, which is in front, and its windows.",
         "parameters": {"type": "object", "properties": {}}}),
