@@ -80,11 +80,16 @@ echo "==> Building Marina.app"
 
 APP="app/dist/mac-arm64/Marina.app"
 
-# Sign before the dmg is built, or the dmg ships an unsigned copy. The signature
-# is ad-hoc, which is enough for macOS to remember the microphone grant.
-echo "==> Signing"
+# Sign before the dmg is built, or the dmg ships an unsigned copy. With a real
+# signing identity, macOS keeps Screen Recording and Accessibility across
+# rebuilds; an ad-hoc signature changes every build, so they'd be asked for
+# again each time. Set MARINA_SIGN_IDENTITY to choose one; otherwise the first
+# Apple Development identity in the keychain is used, or ad-hoc if there's none.
+IDENTITY="${MARINA_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | awk -F'"' '/Apple Development/ {print $2; exit}')}"
+echo "==> Signing (${IDENTITY:-ad-hoc})"
 xattr -cr "$APP"
-codesign --force --deep --sign - "$APP"
+codesign --force --deep --sign "${IDENTITY:--}" "$APP"
 codesign --verify --deep "$APP" && echo "    signature verified"
 xattr -cr "$APP"
 

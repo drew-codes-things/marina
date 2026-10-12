@@ -89,9 +89,10 @@ def as_note():
 
 NOTE_EXPLAINED = (
     "\n\nTheir latest message may end with a <context> tag. The app adds it, "
-    "not them: it is the real date and time right now, and what is on their "
-    "screen. Trust it over anything else, so when they ask the time, tell "
-    "them exactly. Never mention the tag or quote it."
+    "not them: it is the real date and time right now, and which app they "
+    "have in front. Trust it over anything else, so when they ask the time, "
+    "tell them exactly. It says nothing about what is in that app, so never "
+    "guess at that. Never mention the tag or quote it."
 )
 
 

@@ -357,11 +357,15 @@ _MODIFIERS = {"shift": 0x20000, "ctrl": 0x40000, "control": 0x40000, "alt": 0x80
               "option": 0x80000, "opt": 0x80000, "cmd": 0x100000, "command": 0x100000}
 
 
+def _lsappinfo(*args):
+    return subprocess.run(["lsappinfo", *args], capture_output=True, text=True,
+                          timeout=5).stdout
+
+
 def _frontmost():
-    return subprocess.run(
-        ["osascript", "-e", 'tell application "System Events" to get name of first '
-                            'application process whose frontmost is true'],
-        capture_output=True, text=True, timeout=10).stdout.strip()
+    """The app in front. lsappinfo needs no permission, unlike System Events."""
+    names = re.findall(r'"([^"]+)"', _lsappinfo("info", "-only", "name", _lsappinfo("front").strip()))
+    return names[-1] if names else ""
 
 
 def _guard_front():
@@ -404,24 +408,28 @@ def mac_click(target="", x=None, y=None, button="left", double=False):
     return f"Clicked {what}. Look at the screen to check it did what you meant."
 
 
-def mac_type(text):
+def mac_type(text, app=""):
     if not can_control():
         return _NO_CONTROL
     text = text if isinstance(text, str) else str(text or "")
     if not text:
         return "Nothing to type."
+    if app and not _bring_forward(app, wait=3):
+        return (f"Didn't type: {_frontmost() or 'another app'} is in front, not {app}. "
+                f"Open {app} first.")
     try:
         _guard_front()
         cg, post = _events()
-        for i in range(0, len(text), 20):
-            chunk = text[i:i + 20]
-            units = chunk.encode("utf-16-le")
+        # One character per event: some apps (Chrome, Electron) drop the rest
+        # of a longer one.
+        for ch in text:
+            units = ch.encode("utf-16-le")
             buf = (ctypes.c_uint16 * (len(units) // 2)).from_buffer_copy(units)
             for pressed in (True, False):
                 event = cg.CGEventCreateKeyboardEvent(None, 0, pressed)
                 cg.CGEventKeyboardSetUnicodeString(event, len(buf), buf)
                 post(event)
-            time.sleep(0.01)
+            time.sleep(0.008)
     except PermissionError as e:
         return str(e)
     except Exception as e:
@@ -480,30 +488,83 @@ def mac_scroll(direction="down", amount=5):
 
 # --- apps ----------------------------------------------------------------------
 
-_APPS_SCRIPT = """
-on joined(itemList)
-    set AppleScript's text item delimiters to ", "
-    return itemList as text
-end joined
-tell application "System Events"
-    set frontApp to name of first application process whose frontmost is true
-    set openApps to name of every application process whose background only is false
-    set frontWindows to name of every window of (first application process whose frontmost is true)
-end tell
-return frontApp & linefeed & my joined(openApps) & linefeed & my joined(frontWindows)
-"""
+def _window_titles():
+    """Titles of the windows on screen, by app. Needs Screen Recording."""
+    cg, cf = _cg(), ctypes.cdll.LoadLibrary(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    vp, c = ctypes.c_void_p, ctypes
+    cg.CGWindowListCopyWindowInfo.restype = vp
+    cg.CGWindowListCopyWindowInfo.argtypes = [c.c_uint32, c.c_uint32]
+    cf.CFArrayGetCount.restype = c.c_long
+    cf.CFArrayGetCount.argtypes = [vp]
+    cf.CFArrayGetValueAtIndex.restype = vp
+    cf.CFArrayGetValueAtIndex.argtypes = [vp, c.c_long]
+    cf.CFDictionaryGetValue.restype = vp
+    cf.CFDictionaryGetValue.argtypes = [vp, vp]
+    cf.CFStringGetCString.restype = c.c_bool
+    cf.CFStringGetCString.argtypes = [vp, c.c_char_p, c.c_long, c.c_uint32]
+    cf.CFNumberGetValue.restype = c.c_bool
+    cf.CFNumberGetValue.argtypes = [vp, c.c_int, vp]
+    cf.CFRelease.argtypes = [vp]
+
+    def key(name):
+        return vp.in_dll(cg, name).value
+
+    def text(ref):
+        buf = c.create_string_buffer(1024)
+        return buf.value.decode("utf-8", "replace") if ref and cf.CFStringGetCString(
+            ref, buf, 1024, 0x08000100) else ""
+
+    owner, title, layer = key("kCGWindowOwnerName"), key("kCGWindowName"), key("kCGWindowLayer")
+    windows = cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # on screen, no desktop
+    out = {}
+    try:
+        for i in range(cf.CFArrayGetCount(windows)):
+            d = cf.CFArrayGetValueAtIndex(windows, i)
+            lvl = c.c_int(0)
+            cf.CFNumberGetValue(cf.CFDictionaryGetValue(d, layer), 3, c.byref(lvl))
+            name = text(cf.CFDictionaryGetValue(d, title))
+            if lvl.value == 0 and name:
+                out.setdefault(text(cf.CFDictionaryGetValue(d, owner)), []).append(name)
+    finally:
+        cf.CFRelease(windows)
+    return out
 
 
 def mac_apps():
-    out = subprocess.run(["osascript", "-e", _APPS_SCRIPT], capture_output=True, text=True, timeout=15)
-    if out.returncode != 0:
-        return ("Couldn't list their apps: " + out.stderr.strip()[:200]
-                + " (macOS may be asking them to let Marina control System Events.)")
-    front, apps, wins = (out.stdout.strip().split("\n") + ["", "", ""])[:3]
-    return f"In front: {front}\nWindows of {front}: {wins or '(none)'}\nOpen apps: {apps}"
+    try:
+        front = _frontmost()
+        apps = re.findall(r'"([^"]+)"', _lsappinfo("visibleProcessList"))
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Couldn't list their apps: {type(e).__name__}"
+    apps = [a.replace("_", " ") for a in apps]
+    titles = {}
+    if can_see():
+        try:
+            titles = _window_titles()
+        except (OSError, ValueError) as e:
+            print(f"[mac] window titles failed: {e}", flush=True)
+    lines = [f"In front: {front or '(unknown)'}", "Open apps: " + ", ".join(apps)]
+    for app, names in titles.items():
+        if app in apps and not _SECRET_APPS.search(app):
+            lines.append(f"Windows of {app}: " + "; ".join(names[:6]))
+    return "\n".join(lines)
 
 
-def mac_open(app="", url=""):
+def _bring_forward(app, wait=10.0):
+    """Wait until `app` is in front. Typing before then would land in
+    whatever they had open."""
+    want = app.lower().removesuffix(".app")
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        front = _frontmost().lower()
+        if front and (front == want or want in front or front in want):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def mac_open(app="", url="", new_document=False):
     if url:
         if not re.match(r"^https?://", url):
             return "Only http and https links."
@@ -518,6 +579,17 @@ def mac_open(app="", url=""):
     if out.returncode != 0:
         return f"Couldn't open {app}: {out.stderr.strip()[:200]}"
     print(f"[mac] opened {app}", flush=True)
+    if not _bring_forward(app):
+        return (f"Asked macOS to open {app}, but {_frontmost() or 'something else'} is "
+                "still in front. Look at the screen before typing anything.")
+    if new_document:
+        if not can_control():
+            return f"{app} is in front, but " + _NO_CONTROL
+        time.sleep(0.6)  # let its first window or file picker appear
+        mac_key("cmd+n")
+        time.sleep(0.8)
+        return (f"{app} is in front with a new document open. Type with "
+                f"mac_type(text, app=\"{app}\").")
     return f"{app} is open and in front."
 
 
@@ -580,9 +652,13 @@ SPECS = [
         "parameters": {"type": "object", "properties": {}}}),
     ("mac_open", mac_open, {
         "description": "Open or bring to the front an app on their Mac (by name, e.g. "
-                       "\"Safari\", \"Visual Studio Code\"), or open a web link.",
+                       "\"Safari\", \"Visual Studio Code\"), or open a web link. Waits "
+                       "until the app is in front. Set new_document when they want "
+                       "something written in a new document (TextEdit, Pages, Notes...): "
+                       "it presses cmd+n, which also gets past TextEdit's file picker.",
         "parameters": {"type": "object", "properties": {
-            "app": {"type": "string"}, "url": {"type": "string"}}}}),
+            "app": {"type": "string"}, "url": {"type": "string"},
+            "new_document": {"type": "boolean"}}}}),
     ("mac_click", mac_click, {
         "description": "Click on their Mac's screen. Describe what to click in target "
                        "(e.g. \"the Save button in the dialog\") and it is found on a fresh "
@@ -592,8 +668,11 @@ SPECS = [
             "button": {"type": "string", "enum": ["left", "right"]},
             "double": {"type": "boolean"}}}}),
     ("mac_type", mac_type, {
-        "description": "Type text into whatever has focus on their Mac. Click the field first.",
-        "parameters": {"type": "object", "properties": {"text": {"type": "string"}},
+        "description": "Type text into whatever has focus on their Mac. Give app (the "
+                       "app you mean to type into) and nothing is typed unless it is in "
+                       "front. In a form or field, click it first.",
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}, "app": {"type": "string"}},
                        "required": ["text"]}}),
     ("mac_key", mac_key, {
         "description": "Press a key or shortcut on their Mac: e.g. return, tab, escape, "
@@ -639,7 +718,11 @@ You can also work on their Mac, the computer they are using right now:
 mac_look to see the screen, mac_apps to see what's open, mac_open, mac_click,
 mac_type, mac_key and mac_scroll to use it, and mac_run_command and the
 mac_*_file tools for commands and files. Their Mac is theirs, not yours: be
-careful with it, do what they asked and nothing more. Look before you act
+careful with it, do what they asked and nothing more. Whenever they ask
+what's on their screen or what they have open, call mac_look or mac_apps
+in this reply and answer from what it returns, never from memory or from
+earlier in the conversation: their screen changes all the time, and a
+made-up answer is worse than none. Look before you act
 in an app and look again afterwards to check. The first time in a reply you
 use their mouse or keyboard, and before anything risky, the app asks them;
 if they say no, don't look for a way round it. Until they've answered,

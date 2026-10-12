@@ -41,7 +41,7 @@ It is a big download, around 1 GB, because those models are inside it.
 
 ### Getting past Gatekeeper
 
-I don't pay Apple £99 a year, so the app is signed ad-hoc rather than being notarized.
+I don't pay Apple £99 a year, so the app isn't notarized.
 macOS will refuse to open it the first time and say Marina "is damaged" or is
 from an unidentified developer its not i just dont want to pay
 
