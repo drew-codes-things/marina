@@ -104,3 +104,31 @@ def test_no_typing_while_macos_is_asking_something(monkeypatch):
         {"owner": "UserNotificationCenter", "title": "", "layer": 8, "bounds": (0, 0, 10, 10)}])
     assert "prompt" in mac.mac_type("hello\n", app="TextEdit")
     assert "prompt" in mac.mac_key("return")
+
+
+def test_app_names_match_what_is_installed(monkeypatch):
+    monkeypatch.setattr(mac, "_installed_apps", lambda: [
+        "Google Chrome", "LibreOffice", "Passwords", "Photos", "TextEdit", "Visual Studio Code"])
+    assert mac._installed_app("LibreOffice Writer") == "LibreOffice"
+    assert mac._installed_app("chrome") == "Google Chrome"
+    assert mac._installed_app("vscode") == "Visual Studio Code"
+    assert mac._installed_app("Text Edit") == "TextEdit"
+    assert mac._installed_app("Word") is None        # not "Passwords"
+    assert mac._installed_app("Photoshop") is None   # not "Photos"
+
+
+def test_typing_undoes_escaping_from_the_model():
+    assert mac._as_typed("Zoë &amp; me") == "Zoë & me"
+    assert mac._as_typed("line one\\nline two") == "line one\nline two"
+    # Text that already has real new lines keeps a written \n (it's likely code).
+    assert mac._as_typed('print("a\\n")\nprint("b")') == 'print("a\\n")\nprint("b")'
+
+
+def test_garbled_tool_calls_are_not_run(monkeypatch):
+    from process.tools import registry
+    ran = []
+    monkeypatch.setitem(registry._HANDLERS, "mac_open",
+                        (lambda **a: ran.append(a) or "opened", lambda: True))
+    out = registry.run("mac_open", {"app": "LibreOffice Writer done!\n\n<tool_call>\n<function=mac_type>"})
+    assert "Didn't run" in out and not ran
+    assert registry.run("mac_open", {"app": "LibreOffice"}) == "opened"

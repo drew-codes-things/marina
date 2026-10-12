@@ -5,6 +5,7 @@ open_url only accepts http and https. The clipboard and open_url need a Mac,
 so a headless bridge on Linux leaves them out.
 """
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -229,6 +230,9 @@ def definitions():
     return tools or None
 
 
+_GARBLED = re.compile(r"<tool_call>|</?function[=>]|</?parameter[=>]")
+
+
 def run(name, arguments):
     """Run one tool call. Errors are returned as text for the model."""
     fn, on = _HANDLERS.get(name, (None, None))
@@ -240,6 +244,13 @@ def run(name, arguments):
         return "Those arguments were not valid JSON."
     if not isinstance(args, dict):
         return "Those arguments were not an object."
+    if any(isinstance(v, str) and _GARBLED.search(v) for v in args.values()):
+        # The model wrote its next call (or several) inside this one's
+        # arguments. Running it would open "LibreOffice <tool_call>..." or
+        # type the markup into their document.
+        return (f"Didn't run {name}: its arguments had another tool call written inside "
+                "them. Make one tool call at a time, with only the plain value in each "
+                "argument.")
     try:
         return str(fn(**args))
     except TypeError as e:

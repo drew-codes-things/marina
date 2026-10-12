@@ -18,6 +18,7 @@ Settings > Privacy & Security.
 """
 import base64
 import ctypes
+import html
 import json
 import os
 import re
@@ -265,12 +266,67 @@ def _screen_points():
     return r.w, r.h
 
 
+def _capture_without_her(path):
+    """Write the main display to `path` as JPEG, leaving out her own window
+    so her avatar doesn't cover what she's looking at. False if it can't."""
+    windows = _windows(desktop=True)
+    keep = [w["number"] for w in windows if w["owner"] != "Marina" and w["number"]]
+    if len(keep) == len(windows):
+        return False  # she isn't on screen; screencapture is fine
+    c, vp = ctypes, ctypes.c_void_p
+    cg = _cg()
+    cf = c.cdll.LoadLibrary("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    io = c.cdll.LoadLibrary("/System/Library/Frameworks/ImageIO.framework/ImageIO")
+    cf.CFArrayCreate.restype = vp
+    cf.CFArrayCreate.argtypes = [vp, c.POINTER(vp), c.c_long, vp]
+    cf.CFStringCreateWithCString.restype = vp
+    cf.CFStringCreateWithCString.argtypes = [vp, c.c_char_p, c.c_uint32]
+    cf.CFURLCreateFromFileSystemRepresentation.restype = vp
+    cf.CFURLCreateFromFileSystemRepresentation.argtypes = [vp, c.c_char_p, c.c_long, c.c_bool]
+    cf.CFRelease.argtypes = [vp]
+    cg.CGWindowListCreateImageFromArray.restype = vp
+    cg.CGWindowListCreateImageFromArray.argtypes = [_CGRect, vp, c.c_uint32]
+    cg.CGImageRelease.argtypes = [vp]
+    io.CGImageDestinationCreateWithURL.restype = vp
+    io.CGImageDestinationCreateWithURL.argtypes = [vp, vp, c.c_long, vp]
+    io.CGImageDestinationAddImage.argtypes = [vp, vp, vp]
+    io.CGImageDestinationFinalize.restype = c.c_bool
+    io.CGImageDestinationFinalize.argtypes = [vp]
+
+    w, h = _screen_points()
+    ids = (vp * len(keep))(*keep)
+    array = cf.CFArrayCreate(None, ids, len(keep), None)
+    image = cg.CGWindowListCreateImageFromArray(_CGRect(0, 0, w, h), array, 0)
+    cf.CFRelease(array)
+    if not image:
+        return False
+    raw = path.encode()
+    url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), False)
+    kind = cf.CFStringCreateWithCString(None, b"public.jpeg", 0x08000100)
+    dest = io.CGImageDestinationCreateWithURL(url, kind, 1, None)
+    ok = False
+    if dest:
+        io.CGImageDestinationAddImage(dest, image, None)
+        ok = io.CGImageDestinationFinalize(dest)
+        cf.CFRelease(dest)
+    for ref in (url, kind):
+        cf.CFRelease(ref)
+    cg.CGImageRelease(image)
+    return bool(ok)
+
+
 def _screenshot():
     """(base64 JPEG, image width, image height) of the main display."""
     fd, path = tempfile.mkstemp(suffix=".jpg")
     os.close(fd)
     try:
-        subprocess.run(["screencapture", "-x", "-m", "-t", "jpg", path], check=True, timeout=15)
+        try:
+            captured = _capture_without_her(path)
+        except (OSError, ValueError, AttributeError) as e:
+            print(f"[mac] capture without her window failed ({e}); using screencapture", flush=True)
+            captured = False
+        if not captured:
+            subprocess.run(["screencapture", "-x", "-m", "-t", "jpg", path], check=True, timeout=15)
         subprocess.run(["sips", "-Z", "1600", "-s", "formatOptions", "75", path],
                        capture_output=True, timeout=15)
         size = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
@@ -293,8 +349,7 @@ def _vision(prompt, image, max_tokens=300):
     return (out.choices[0].message.content or "").strip()
 
 
-LOOK_PROMPT = """This is a screenshot of their Mac's screen (your own avatar may be in
-a corner; ignore it). Describe what is on it plainly and accurately, for
+LOOK_PROMPT = """This is a screenshot of their Mac's screen. Describe what is on it plainly and accurately, for
 your own use: which app is in front, what windows are open and what is in
 them, and any text that matters to what they asked. Don't read out
 passwords, codes or private messages in detail. Plain sentences, no
@@ -463,10 +518,19 @@ def _modifiers_released(cg, wait=2.0):
     return True
 
 
+def _as_typed(text):
+    """Undo the escaping models sometimes put in tool arguments: &amp; for &,
+    and a written-out \\n for a new line when there are no real ones."""
+    text = html.unescape(text)
+    if "\n" not in text and "\\n" in text:
+        text = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    return text
+
+
 def mac_type(text, app=""):
     if not can_control():
         return _NO_CONTROL
-    text = text if isinstance(text, str) else str(text or "")
+    text = _as_typed(text if isinstance(text, str) else str(text or ""))
     if not text:
         return "Nothing to type."
     if app and not _bring_forward(app, wait=3):
@@ -580,7 +644,7 @@ class _CGRectD(ctypes.Structure):
                 ("w", ctypes.c_double), ("h", ctypes.c_double)]
 
 
-def _windows():
+def _windows(desktop=False):
     """Windows on screen, front to back: owner, title, layer, bounds.
     Titles need Screen Recording; the rest doesn't."""
     cg, cf = _cg(), ctypes.cdll.LoadLibrary(
@@ -610,20 +674,22 @@ def _windows():
         return buf.value.decode("utf-8", "replace") if ref and cf.CFStringGetCString(
             ref, buf, 1024, 0x08000100) else ""
 
-    owner, title = key("kCGWindowOwnerName"), key("kCGWindowName")
+    owner, title, number = key("kCGWindowOwnerName"), key("kCGWindowName"), key("kCGWindowNumber")
     layer, bounds = key("kCGWindowLayer"), key("kCGWindowBounds")
-    windows = cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # on screen, no desktop
+    windows = cg.CGWindowListCopyWindowInfo(1 if desktop else 1 | 16, 0)  # on screen
     out = []
     try:
         for i in range(cf.CFArrayGetCount(windows)):
             d = cf.CFArrayGetValueAtIndex(windows, i)
-            lvl, rect = c.c_int(0), _CGRectD()
+            lvl, rect, num = c.c_int(0), _CGRectD(), c.c_uint32(0)
+            cf.CFNumberGetValue(cf.CFDictionaryGetValue(d, number), 3, c.byref(num))
             cf.CFNumberGetValue(cf.CFDictionaryGetValue(d, layer), 3, c.byref(lvl))
             cg.CGRectMakeWithDictionaryRepresentation(cf.CFDictionaryGetValue(d, bounds),
                                                       c.byref(rect))
             out.append({"owner": text(cf.CFDictionaryGetValue(d, owner)),
                         "title": text(cf.CFDictionaryGetValue(d, title)),
-                        "layer": lvl.value, "bounds": (rect.x, rect.y, rect.w, rect.h)})
+                        "layer": lvl.value, "bounds": (rect.x, rect.y, rect.w, rect.h),
+                        "number": num.value})
     finally:
         cf.CFRelease(windows)
     return out
@@ -671,6 +737,53 @@ def _bring_forward(app, wait=10.0):
     return False
 
 
+def _installed_apps():
+    names = set()
+    for folder in (Path("/Applications"), Path("/System/Applications"),
+                   Path("/System/Applications/Utilities"), HOME / "Applications"):
+        try:
+            names.update(p.stem for p in folder.glob("*.app"))
+        except OSError:
+            pass
+    return sorted(names, key=str.lower)
+
+
+_APP_NICKNAMES = {"word": "Microsoft Word", "excel": "Microsoft Excel",
+                  "powerpoint": "Microsoft PowerPoint", "outlook": "Microsoft Outlook",
+                  "teams": "Microsoft Teams", "vscode": "Visual Studio Code",
+                  "vs code": "Visual Studio Code", "code": "Visual Studio Code",
+                  "chrome": "Google Chrome", "writer": "LibreOffice", "calc": "LibreOffice"}
+
+
+def _installed_app(name):
+    """The installed app they most likely mean: "LibreOffice Writer" is
+    LibreOffice, "vscode" is Visual Studio Code. None if nothing fits."""
+    want = name.lower().removesuffix(".app").strip()
+    apps = _installed_apps()
+    by_lower = {a.lower(): a for a in apps}
+    if want in by_lower:
+        return by_lower[want]
+    nick = _APP_NICKNAMES.get(want)
+    if nick and nick.lower() in by_lower:
+        return by_lower[nick.lower()]
+
+    def words(text):
+        return re.findall(r"[a-z0-9]+", text.lower())
+
+    said = words(want)
+    # Every word of the app's name is in what they said ("LibreOffice Writer"
+    # -> LibreOffice), or every word they said is in the app's name ("chrome"
+    # -> Google Chrome). Whole words only, so "word" isn't "Passwords".
+    within = [a for a in apps if words(a) and all(w in said for w in words(a))]
+    if within:
+        return max(within, key=len)
+    around = [a for a in apps if said and all(w in words(a) for w in said)]
+    if around:
+        return min(around, key=len)
+    squashed = {"".join(words(a)): a for a in apps}  # "Text Edit" -> TextEdit
+    return squashed.get("".join(said))
+
+
 def mac_open(app="", url="", new_document=False):
     if url:
         if not re.match(r"^https?://", url):
@@ -684,7 +797,14 @@ def mac_open(app="", url="", new_document=False):
         return f"{app} holds their passwords, so it's off limits."
     out = subprocess.run(["open", "-a", app], capture_output=True, text=True, timeout=15)
     if out.returncode != 0:
-        return f"Couldn't open {app}: {out.stderr.strip()[:200]}"
+        match = _installed_app(app)
+        if not match or _SECRET_APPS.search(match):
+            return (f"Couldn't open {app}: no app by that name. Installed apps include: "
+                    + ", ".join(_installed_apps()[:60]))
+        out = subprocess.run(["open", "-a", match], capture_output=True, text=True, timeout=15)
+        if out.returncode != 0:
+            return f"Couldn't open {match}: {out.stderr.strip()[:200]}"
+        app = match
     print(f"[mac] opened {app}", flush=True)
     if not _bring_forward(app):
         return (f"Asked macOS to open {app}, but {_frontmost() or 'something else'} is "
@@ -859,7 +979,8 @@ careful with it, do what they asked and nothing more. Whenever they ask
 what's on their screen or what they have open, call mac_look or mac_apps
 in this reply and answer from what it returns, never from memory or from
 earlier in the conversation: their screen changes all the time, and a
-made-up answer is worse than none. Look before you act
+made-up answer is worse than none. Never delete or replace what's already in one of their documents unless
+they asked you to; to write something new, start a new document. Look before you act
 in an app and look again afterwards to check. The first time in a reply you
 use their mouse or keyboard, and before anything risky, the app asks them;
 if they say no, don't look for a way round it. Until they've answered,
