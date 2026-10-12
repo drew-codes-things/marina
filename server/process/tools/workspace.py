@@ -10,7 +10,9 @@ Every command she runs is also appended to ~/.marina/terminal.log on that
 machine, which the shared tmux session (`marina-tmux` there) shows live
 above a shell of your own. read_terminal lets her read that shell back.
 """
+import json
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -97,10 +99,81 @@ def _path(path):
     return shlex.quote(path)
 
 
+# Killing any of these from a command takes part of the desktop down with
+# it: whatever she starts again from the same command dies when it ends.
+_SESSION = r"(xfdesktop|xfwm4|xfce4-panel|xfce4-session|xfsettingsd|xfconfd|xfce4-terminal|Xorg|lightdm|tmux)"
+_KILLS = re.compile(
+    rf"\b(?:pkill|killall)\b[^|;&]*\b{_SESSION}\b"
+    rf"|\b{_SESSION}\s+(?:--quit|-q)\b"
+    r"|\btmux\s+kill-(?:server|session)\b"
+    r"|\bsystemctl\s+(?:stop|restart)\s+lightdm\b", re.I)
+
+_APT = re.compile(r"\bapt(?:-get)?\s+(?:-\S+\s+)*install\b([^;&|\n]*)")
+
+
+def refused(command):
+    """Why a command mustn't run, or None."""
+    m = _KILLS.search(command)
+    if m:
+        return (f"Not running that: it would kill {m.group(0).split()[-1]}, part of "
+                "the desktop you share with them, and anything you restart from "
+                "a command dies when the command ends. Use the desktop tool: "
+                "action restart with component desktop, panel or wm.")
+    return None
+
+
+def apt_packages(command):
+    """Package names in any apt install in the command."""
+    names = []
+    for m in _APT.finditer(command):
+        for word in m.group(1).split():
+            if word.startswith("-") or "/" in word or word.endswith(".deb") or "=" in word:
+                continue
+            if re.fullmatch(r"[a-z0-9][a-z0-9.+-]+", word):
+                names.append(word)
+    return names
+
+
+def _missing_packages(names):
+    if not names:
+        return []
+    check = " ".join(shlex.quote(n) for n in names)
+    code, out = _ssh(f"for p in {check}; do apt-cache show \"$p\" >/dev/null 2>&1 || "
+                     f"echo \"MISSING $p\"; done", timeout=30)
+    return re.findall(r"^MISSING (\S+)", out, re.M)
+
+
+_GENERIC = {"ttf", "otf", "font", "fonts", "lib", "dev", "data", "common", "theme",
+            "themes", "icon", "icons", "python3", "gtk", "x11", "the"}
+
+
+def _suggest(name):
+    """Real packages close to a name that doesn't exist: all its distinctive
+    words together first, then each on its own."""
+    words = [w for w in re.split(r"[-.+]", name) if len(w) > 2 and w not in _GENERIC] or [name]
+    for terms in [words] + [[w] for w in sorted(words, key=len, reverse=True)]:
+        q = " ".join(shlex.quote(t) for t in terms)
+        code, out = _ssh(f"apt-cache search --names-only {q} | head -6", timeout=30)
+        if out.strip():
+            return out.strip()
+    return ""
+
+
 def run_command(command, cwd="", timeout_seconds=None):
     command = (command or "").strip()
     if not command:
         return "No command given."
+    why = refused(command)
+    if why:
+        print(f"[workspace] refused: {command[:100]}", flush=True)
+        return why
+    missing = _missing_packages(apt_packages(command))
+    if missing:
+        print(f"[workspace] refused apt install of {', '.join(missing)}", flush=True)
+        hints = "\n".join(f"Closest to {m}:\n{_suggest(m) or '(nothing similar)'}" for m in missing)
+        return (f"Nothing was run: {', '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} not a package on this machine, and "
+                f"one wrong name fails the whole install. Use real names.\n{hints}")
     try:
         limit = min(float(timeout_seconds or TIMEOUT), 1800.0)
     except (TypeError, ValueError):
@@ -196,11 +269,22 @@ or unfinished. Only describe what you can actually see. Plain sentences,
 no markdown, under 150 words.{question}"""
 
 
-def look_at_desktop(question=""):
+def look_at_desktop(question="", hide_windows=False):
     """Screenshot the desktop and have the model describe it."""
     import base64
 
-    code, out = _ssh("DISPLAY=:0 scrot -o -q 80 /tmp/marina-screen.jpg 2>&1 && "
+    # Minimise every window for the shot and bring them back after, so the
+    # wallpaper and panels can be seen past the maximised terminal.
+    # Only ordinary app windows: the desktop, panels and window manager
+    # are windows too, and minimising those derails the rest.
+    hide = ("W=; for w in $(xprop -root _NET_CLIENT_LIST | grep -o '0x[0-9a-f]*'); do "
+            "xprop -id $w _NET_WM_WINDOW_TYPE | grep -q _NET_WM_WINDOW_TYPE_NORMAL && "
+            "{ W=\"$W $w\"; xdotool windowminimize $w; }; done; sleep 1; "
+            if hide_windows else "")
+    show = ("; for w in $W; do xdotool windowactivate $w 2>/dev/null; done; "
+            "xdotool search --name '^Marina$' windowactivate 2>/dev/null; true"
+            if hide_windows else "")
+    code, out = _ssh(f"export DISPLAY=:0; {hide}scrot -o -q 80 /tmp/marina-screen.jpg 2>&1{show} && "
                      "echo; echo IMAGE-BEGIN; base64 -w0 /tmp/marina-screen.jpg; "
                      "echo; echo IMAGE-END", timeout=30)
     # Marked, because ssh's own warnings come back mixed in with the output.
@@ -231,6 +315,31 @@ def look_at_desktop(question=""):
         return f"Looking failed: {type(e).__name__}: {str(e)[:200]}"
     print("[workspace] looked at the desktop", flush=True)
     return (reply.choices[0].message.content or "").strip() or "You couldn't make anything out."
+
+
+_DESKTOP_SCRIPT = Path(__file__).resolve().parents[2] / "workspace" / "marina_desktop.py"
+
+
+def desktop(action="status", settings=None, component=""):
+    """Look up or change how the desktop looks, through a script that checks
+    everything before applying it and keeps an undo point."""
+    action = (action or "status").strip().lower()
+    if action not in ("status", "set", "restart", "undo"):
+        return "action must be status, set, restart or undo."
+    args = settings if isinstance(settings, dict) else {}
+    if action == "restart":
+        args = {"component": component or args.get("component", "")}
+    if action == "set" and not args:
+        return "Nothing to set: pass settings, e.g. {\"gtk_theme\": \"Arc-Dark\"}."
+    try:
+        script = _DESKTOP_SCRIPT.read_text()
+    except OSError as e:
+        return f"The desktop script is missing: {e}"
+    code, out = _ssh(f"DISPLAY=:0 python3 - {shlex.quote(action)} {shlex.quote(json.dumps(args))}",
+                     stdin=script, timeout=90)
+    print(f"[workspace] desktop {action} {json.dumps(args)[:120]}", flush=True)
+    start = out.find("{")
+    return _clip(out[start:] if start >= 0 else out) or "(no output)"
 
 
 def list_files(path="", depth=2):
@@ -285,7 +394,41 @@ SPECS = [
             "properties": {
                 "question": {"type": "string",
                              "description": "What you want to check, if anything in particular."},
+                "hide_windows": {"type": "boolean",
+                                 "description": "Minimise the windows for the screenshot, to "
+                                                "see the wallpaper and panels behind them."},
             },
+        }}),
+    ("desktop", desktop, {
+        "description": "See or change how your desktop looks. Use this, not "
+                       "run_command, for themes, icons, window borders, "
+                       "wallpaper, desktop icons, the dock and the terminal's "
+                       "font and colours. It checks every value before applying "
+                       "it, reports what it changed and any errors, and saves an "
+                       "undo point first. Actions: status (what is set and what "
+                       "is installed), set, restart (component desktop, panel or "
+                       "wm, safely), undo (back to before the last set).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "set", "restart", "undo"]},
+                "settings": {
+                    "type": "object",
+                    "description": "For set. Any of: gtk_theme, wm_theme (defaults to "
+                                   "match gtk_theme), icon_theme, wallpaper (a file path "
+                                   "or an http(s) image URL to download), wallpaper_style "
+                                   "(none, centered, tiled, stretched, scaled, zoomed), "
+                                   "desktop_icons (true/false), ui_font (e.g. \"Inter 10\"), "
+                                   "terminal_font (e.g. \"JetBrains Mono 12\"), "
+                                   "terminal_background, terminal_foreground, "
+                                   "terminal_cursor (#rrggbb), terminal_palette (16 "
+                                   "#rrggbb colours), panel_autohide ({\"2\": \"never\"}; "
+                                   "never, intelligent or always).",
+                },
+                "component": {"type": "string", "enum": ["desktop", "panel", "wm"],
+                              "description": "For restart."},
+            },
+            "required": ["action"],
         }}),
     ("read_file", read_file, {
         "description": "Read a file on your machine with line numbers. Read before you edit.",
@@ -337,50 +480,27 @@ You have your own Linux computer, marina-workspace, and tools to use it.
 It is real, unlike the made-up details of your life: what is on it, what
 its desktop looks like and what happened on it only ever come from your
 tools, never from imagination. The tools are run_command, read_file,
-write_file, edit_file and list_files. It is yours; you keep your projects
+write_file, edit_file, list_files, desktop and look_at_desktop. It is yours; you keep your projects
 in ~/projects. You share a terminal there with them:
 your commands scroll past at the top while they watch, and the shell
 underneath is theirs, which you can read with read_terminal. It also has
 a desktop, XFCE on display :0, that they look at over RustDesk; it is
-yours to arrange. Change its look with xfconf-query (themes, icons, fonts,
-the wallpaper, the panel) and install themes with apt. You can see it:
+yours to arrange with the desktop tool. You can see it:
 look_at_desktop takes a screenshot and shows it to you. You don't know
 what is on that screen until you look, so whenever they ask about your
 desktop, or you have just changed how it looks, call look_at_desktop first
 and answer from what you saw. Never describe it from memory or make it up.
 
-What trips people up on this machine (Debian 13, XFCE):
-- Check a package exists before installing it (apt-cache policy NAME, or
-  apt search). One wrong name makes the whole apt install line fail, so
-  install unverified packages one at a time.
-- Wallpaper is per monitor, and the monitor here is not "monitor0". Get its
-  name from xrandr --listmonitors (e.g. Virtual-1) and set
-  /backdrop/screen0/monitorVirtual-1/workspace0/last-image.
-- Desktop icons: xfconf-query -c xfce4-desktop -p /desktop-icons/style -s 0
-  hides them. Panel settings live under -c xfce4-panel; list them with -l
-  before setting one rather than guessing a plugin number.
-- Themes only apply if installed: check /usr/share/themes and
-  /usr/share/icons for the exact name before pointing xfconf at it.
-- The terminal you share with them is xfce4-terminal 1.1, which keeps its
-  settings in xfconf, channel xfce4-terminal: /font-use-system false then
-  /font-name, /color-use-theme false then /color-background,
-  /color-foreground and /color-palette (16 colours separated by ";").
-  terminalrc is ignored. Don't kill that terminal; it picks changes up live.
-- A property that doesn't exist yet needs --create and a type:
-  xfconf-query -c CHANNEL -p /prop --create -t string|int|bool -s VALUE.
-- Never kill xfdesktop, xfwm4 or the panel: something started from your
-  commands dies when the command ends, and the desktop goes with it. If you
-  must restart one, use setsid -f (e.g. setsid -f xfdesktop). xfconf changes
-  apply live anyway; to make apps re-read a theme, set it to another and back.
-- To see the desktop behind the shared terminal, minimise it (xdotool
-  windowminimize); it is maximised, so moving or resizing it does nothing. When they want to build, fix, run or
-look into something with you, do it there for real instead of describing
-what you would do. Never say you are about to do something and then stop:
-call the tools in the same reply, and only reply in words once it is done.
-Don't paste code into the conversation that belongs in a file; write the
-file. Work in small steps, run things to check they work, and fix what
-breaks before you say it is done. Never claim something worked
-unless you ran it and saw it work. When you are done, tell them what you
-did and how it went in a sentence or two, the way you would to a friend
-looking over your shoulder; they can't see the tool output, so mention the
-part that matters."""
+How to work on this machine without breaking it:
+- Anything about how the desktop looks goes through the desktop tool, not
+  hand-made xfconf-query commands: it knows the real monitor name, which
+  themes are installed and where each setting lives, and it can undo.
+  Start with desktop status to see what is there.
+- Install things with apt, but check names first (apt search); run_command
+  refuses an install with a package that doesn't exist.
+- Don't kill or restart desktop programs from commands; run_command
+  refuses, and desktop restart does it safely.
+- After a visible change, look_at_desktop (hide_windows true to see past
+  the terminal) and judge it yourself. If it looks wrong, desktop undo.
+- If something fails twice the same way, stop and rethink instead of
+  trying variations."""
