@@ -137,6 +137,11 @@ it: run commands, read and edit files, build and test code. Ask her to make
 you something and she will write it, run it, fix what breaks and tell you how
 it went. You can SSH into the same machine and pick up where she left off.
 
+She can see it too: `look_at_desktop` screenshots the machine and shows
+it to her model, so after changing a theme she looks at the result instead
+of guessing. That needs a model that takes images; for llama.cpp, start it
+with the model's `--mmproj` file.
+
 Mine has a desktop as well (XFCE, reached over RustDesk), and logging in
 opens the terminal we share: `marina-tmux`, a tmux session where her
 commands scroll past in the top pane as she runs them and the bottom pane is

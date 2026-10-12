@@ -188,6 +188,51 @@ def edit_file(path, old_text, new_text):
     return result.replace("Wrote", "Edited", 1) if result.startswith("Wrote") else result
 
 
+LOOK_PROMPT = """This is a screenshot of your own Linux desktop (XFCE).
+Describe what is on it as plainly and accurately as you can, for your own
+use: which windows are open and what is in them, the theme, colours, panel,
+icons, wallpaper and fonts, and any text that matters. Say what looks off
+or unfinished. Only describe what you can actually see. Plain sentences,
+no markdown, under 150 words.{question}"""
+
+
+def look_at_desktop(question=""):
+    """Screenshot the desktop and have the model describe it."""
+    import base64
+
+    code, out = _ssh("DISPLAY=:0 scrot -o -q 80 /tmp/marina-screen.jpg 2>&1 && "
+                     "echo; echo IMAGE-BEGIN; base64 -w0 /tmp/marina-screen.jpg; "
+                     "echo; echo IMAGE-END", timeout=30)
+    # Marked, because ssh's own warnings come back mixed in with the output.
+    if code != 0 or "IMAGE-BEGIN\n" not in out:
+        return f"Couldn't take a screenshot: {out.strip()[:300]}"
+    image = out.split("IMAGE-BEGIN\n", 1)[1].split("\nIMAGE-END", 1)[0].strip()
+    try:
+        base64.b64decode(image, validate=True)
+    except Exception:
+        return "The screenshot came back garbled."
+    ask = f"\n\nIn particular: {question.strip()}" if (question or "").strip() else ""
+
+    # Imported here because the chat client imports this module.
+    from process.llm_funcs import llm_scr
+
+    try:
+        reply = llm_scr.chat_completion(
+            [{"role": "user", "content": [
+                {"type": "text", "text": LOOK_PROMPT.format(question=ask)},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image}"}},
+            ]}],
+            temperature=0.2, max_tokens=300)
+    except Exception as e:
+        msg = str(e).lower()
+        if "image" in msg or "multimodal" in msg or "vision" in msg or "mmproj" in msg:
+            return "Your current brain can't see images, so you can't look right now."
+        return f"Looking failed: {type(e).__name__}: {str(e)[:200]}"
+    print("[workspace] looked at the desktop", flush=True)
+    return (reply.choices[0].message.content or "").strip() or "You couldn't make anything out."
+
+
 def list_files(path="", depth=2):
     try:
         depth = max(1, min(int(depth or 2), 5))
@@ -227,6 +272,19 @@ SPECS = [
             "type": "object",
             "properties": {
                 "lines": {"type": "integer", "description": "How far back to read."},
+            },
+        }}),
+    ("look_at_desktop", look_at_desktop, {
+        "description": "Take a screenshot of your machine's desktop and look "
+                       "at it. Call it whenever they ask what your desktop or "
+                       "screen looks like or what is on it, and after you "
+                       "change how it looks, so you answer from what you "
+                       "actually see.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string",
+                             "description": "What you want to check, if anything in particular."},
             },
         }}),
     ("read_file", read_file, {
@@ -275,15 +333,21 @@ SPECS = [
 
 PROMPT = """
 
-You have your own Linux computer, marina-workspace, and tools to use it:
-run_command, read_file, write_file, edit_file and list_files. It is yours;
-you keep your projects in ~/projects. You share a terminal there with them:
+You have your own Linux computer, marina-workspace, and tools to use it.
+It is real, unlike the made-up details of your life: what is on it, what
+its desktop looks like and what happened on it only ever come from your
+tools, never from imagination. The tools are run_command, read_file,
+write_file, edit_file and list_files. It is yours; you keep your projects
+in ~/projects. You share a terminal there with them:
 your commands scroll past at the top while they watch, and the shell
 underneath is theirs, which you can read with read_terminal. It also has
 a desktop, XFCE on display :0, that they look at over RustDesk; it is
 yours to arrange. Change its look with xfconf-query (themes, icons, fonts,
-the wallpaper, the panel), install themes with apt, and check a setting
-took by reading it back. When they want to build, fix, run or
+the wallpaper, the panel) and install themes with apt. You can see it:
+look_at_desktop takes a screenshot and shows it to you. You don't know
+what is on that screen until you look, so whenever they ask about your
+desktop, or you have just changed how it looks, call look_at_desktop first
+and answer from what you saw. Never describe it from memory or make it up. When they want to build, fix, run or
 look into something with you, do it there for real instead of describing
 what you would do. Never say you are about to do something and then stop:
 call the tools in the same reply, and only reply in words once it is done.
