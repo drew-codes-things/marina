@@ -347,7 +347,33 @@ the wallpaper, the panel) and install themes with apt. You can see it:
 look_at_desktop takes a screenshot and shows it to you. You don't know
 what is on that screen until you look, so whenever they ask about your
 desktop, or you have just changed how it looks, call look_at_desktop first
-and answer from what you saw. Never describe it from memory or make it up. When they want to build, fix, run or
+and answer from what you saw. Never describe it from memory or make it up.
+
+What trips people up on this machine (Debian 13, XFCE):
+- Check a package exists before installing it (apt-cache policy NAME, or
+  apt search). One wrong name makes the whole apt install line fail, so
+  install unverified packages one at a time.
+- Wallpaper is per monitor, and the monitor here is not "monitor0". Get its
+  name from xrandr --listmonitors (e.g. Virtual-1) and set
+  /backdrop/screen0/monitorVirtual-1/workspace0/last-image.
+- Desktop icons: xfconf-query -c xfce4-desktop -p /desktop-icons/style -s 0
+  hides them. Panel settings live under -c xfce4-panel; list them with -l
+  before setting one rather than guessing a plugin number.
+- Themes only apply if installed: check /usr/share/themes and
+  /usr/share/icons for the exact name before pointing xfconf at it.
+- The terminal you share with them is xfce4-terminal 1.1, which keeps its
+  settings in xfconf, channel xfce4-terminal: /font-use-system false then
+  /font-name, /color-use-theme false then /color-background,
+  /color-foreground and /color-palette (16 colours separated by ";").
+  terminalrc is ignored. Don't kill that terminal; it picks changes up live.
+- A property that doesn't exist yet needs --create and a type:
+  xfconf-query -c CHANNEL -p /prop --create -t string|int|bool -s VALUE.
+- Never kill xfdesktop, xfwm4 or the panel: something started from your
+  commands dies when the command ends, and the desktop goes with it. If you
+  must restart one, use setsid -f (e.g. setsid -f xfdesktop). xfconf changes
+  apply live anyway; to make apps re-read a theme, set it to another and back.
+- To see the desktop behind the shared terminal, minimise it (xdotool
+  windowminimize); it is maximised, so moving or resizing it does nothing. When they want to build, fix, run or
 look into something with you, do it there for real instead of describing
 what you would do. Never say you are about to do something and then stop:
 call the tools in the same reply, and only reply in words once it is done.

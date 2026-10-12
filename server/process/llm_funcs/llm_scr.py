@@ -6,6 +6,7 @@ vLLM). Which endpoints exist and in what order is up to process.backend.
 import json
 import os
 import random
+import re
 import threading
 import time
 
@@ -82,10 +83,27 @@ def system_message():
 
 def _tool_rounds():
     """How many rounds of tool calls one reply may take before she has to
-    answer. Work on her machine is a chain of them: run, read, fix, rerun."""
+    answer. Work on her machine is a chain of them: run, read, fix, rerun.
+    0 means no limit."""
     if not tools.wants_long_loop():
         return 1
-    return max(1, int(config.setting("llm", "max_tool_rounds", 12)))
+    rounds = int(config.setting("llm", "max_tool_rounds", 0) or 0)
+    return float("inf") if rounds <= 0 else rounds
+
+
+# The same call this many times running means she is stuck, not working.
+STUCK_REPEATS = 3
+
+# A reply that ends by promising to do something, when she could have.
+_PROMISE = re.compile(
+    r"\b(i'?ll|i will|let me|let'?s|i'?m (?:going|gonna) to|gonna|about to)\b",
+    re.I)
+
+
+def _promised(text):
+    """True if the last sentence of a reply says she is about to do something."""
+    tail = re.split(r"(?<=[.!?])\s+", (text or "").strip())[-1]
+    return bool(_PROMISE.search(tail.replace("\u2019", "'")))
 
 
 STICKY = float(_llm.get("fallback_sticky_seconds", 30))
@@ -402,6 +420,8 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
 
     rounds = _tool_rounds()
     done_rounds = 0
+    last_calls = []
+    nudged = False
     while True:
         calls = {}
         said = []
@@ -427,6 +447,19 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
             offer = None
             continue
 
+        if not calls and offer is not None and not nudged and tools.wants_long_loop() \
+                and _promised("".join(said)):
+            # She said what she was about to do and stopped. Hold her to it
+            # once, rather than leaving them with a plan and no work.
+            nudged = True
+            print("[llm] she described a plan without doing it; nudging", flush=True)
+            yield "\n\n"
+            messages = messages + [
+                {"role": "assistant", "content": "".join(said)},
+                {"role": "user", "content": "(go ahead and do it now, with your tools)"},
+            ]
+            continue
+
         if not calls or offer is None:
             return
 
@@ -447,6 +480,16 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
                 "content": result,
             })
         done_rounds += 1
-        if done_rounds >= rounds:
-            # Out of rounds: no more tools, so the next pass has to answer.
+        # Nothing to say, but a chance for the caller to notice it was hung
+        # up on; without it a long run of tool calls never yields, and she
+        # would carry on working for nobody.
+        yield ""
+        signature = json.dumps([(c["name"], c["arguments"]) for _, c in sorted(calls.items())])
+        last_calls = (last_calls + [signature])[-STUCK_REPEATS:]
+        stuck = len(last_calls) == STUCK_REPEATS and len(set(last_calls)) == 1
+        if stuck:
+            print(f"[llm] same tool call {STUCK_REPEATS} times running; "
+                  "making her answer", flush=True)
+        if done_rounds >= rounds or stuck:
+            # No more tools, so the next pass has to answer.
             offer = None

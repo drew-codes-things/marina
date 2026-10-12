@@ -11,9 +11,9 @@ llm:
   max_tokens: 2048
   history_turns: 12
   remember: true
-  # Rounds of tool calls one reply may take. Only matters with the
+  # Rounds of tool calls one reply may take, 0 for no limit. Only matters with the
   # workspace on, where a task is a chain of them: run, read, fix, rerun.
-  max_tool_rounds: 12
+  max_tool_rounds: 0         # 0: no limit
 
   # Backups. With mode: auto she uses the first of these that answers, in
   # order: base_url, then each extra_backends entry, then fallback_base_url.

@@ -130,6 +130,11 @@ def mount(app):
             yield _chunk(cid, "marina", {"role": "assistant", "content": ""})
             try:
                 for piece in stream:
+                    if not piece:
+                        # Between tool calls. An SSE comment keeps the
+                        # connection honest, so a closed tab stops her.
+                        yield ": working\n\n"
+                        continue
                     said.append(piece)
                     yield _chunk(cid, "marina", {"content": piece})
             except Exception as e:
