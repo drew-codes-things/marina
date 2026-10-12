@@ -48,6 +48,7 @@ from process.tts_func.engine import (
 from process.tts_func.engine import warmup as warmup_tts
 from process.text_func.speech import SentenceSplitter, split_reply
 from process import backend
+from process import openai_api
 from process import shared
 from process import config as cfg
 from process import idle
@@ -839,12 +840,20 @@ _LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 @app.middleware("http")
 async def shared_guard(request, call_next):
-    if shared.SERVE_TOKEN:
+    """From the network, only /shared/ (other bridges) and /v1/ (chat front
+    ends), each with its own token. Everything else is for this machine."""
+    if shared.SERVE_TOKEN or openai_api.enabled():
         client = request.client.host if request.client else ""
         if client not in _LOCAL_CLIENTS:
-            sent = request.headers.get("authorization", "")
-            ok = (request.url.path.startswith("/shared/")
-                  and hmac.compare_digest(sent, f"Bearer {shared.SERVE_TOKEN}"))
+            sent = request.headers.get("authorization", "").encode()
+            path = request.url.path
+
+            def has(token):
+                return bool(token) and hmac.compare_digest(sent, f"Bearer {token}".encode())
+
+            ok = ((path.startswith("/shared/") and has(shared.SERVE_TOKEN))
+                  or (path.startswith("/v1/") and openai_api.enabled()
+                      and has(openai_api.KEY)))
             if not ok:
                 return JSONResponse({"error": "forbidden"}, status_code=403)
     return await call_next(request)
@@ -969,6 +978,9 @@ def warmup():
     warmup_tts()
     return {"ok": True}
 
+
+if openai_api.enabled():
+    openai_api.mount(app)
 
 _web = config.get("web") or {}
 if _web.get("enabled"):

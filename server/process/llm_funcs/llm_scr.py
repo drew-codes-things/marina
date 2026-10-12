@@ -372,17 +372,24 @@ def _rejects_tools(e):
     return "tool" in body or "function" in body or e.status_code in (404, 501)
 
 
-def llm_stream(user_input=None, extra_system=None, use_tools=True):
+def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None):
     """Yield reply text as it arrives. The caller saves the turn with
     `save_turn`, since only it knows how much was actually spoken.
 
     `extra_system` is added to the system prompt for this call only.
+    `history` replaces her own conversation, for a chat that keeps its own
+    threads, like Open WebUI.
     """
-    history = _window(load_history())
+    history = _window(load_history()) if history is None else list(history)
     if user_input is not None:
         # The clock goes on this message only, never into the saved history
         # or the system prompt, so the cached prefix stays the same.
-        history.append({"role": "user", "content": user_input + ambient.as_note()})
+        note = ambient.as_note()
+        if isinstance(user_input, list):  # text and images, from a chat UI
+            content = user_input + ([{"type": "text", "text": note.strip()}] if note else [])
+        else:
+            content = user_input + note
+        history.append({"role": "user", "content": content})
 
     system = system_message()
     if extra_system:

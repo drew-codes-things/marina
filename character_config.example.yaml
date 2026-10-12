@@ -378,3 +378,10 @@ shared:
   url: ""            # e.g. "http://192.168.1.15:8765", on the others
   token: ""          # on the others
   serve_token: ""    # on the home bridge
+
+# An OpenAI-style API at /v1/ for chat front ends like Open WebUI: model
+# "marina" is her, "marina-plain" the bare model for the front end's
+# housekeeping. From the network it needs this key (and bridge.host set
+# to "0.0.0.0").
+api:
+  key: ""
