@@ -46,6 +46,19 @@ _SECRET_COMMANDS = re.compile(
     r"\bsecurity\s+(?:find-|dump-|export|unlock)|\.ssh/|Keychains|1password|bitwarden"
     r"|\bop\s+(?:item|read)\b", re.I)
 
+# Driving their apps behind the tools' checks, or touching macOS permissions.
+_UI_COMMANDS = re.compile(
+    r"System Events|\bkeystroke\b|\bkey code\b|\bcliclick\b|\btccutil\b|TCC\.db"
+    r"|with administrator privileges", re.I)
+
+# macOS's own permission, password and security windows. She never clicks,
+# types or presses keys in them: those answers are theirs to give.
+_SYSTEM_UI = re.compile(
+    r"^(?:UserNotificationCenter|SecurityAgent|CoreServicesUIAgent|universalAccessAuthWarn"
+    r"|coreautha|LocalAuthenticationRemoteService|AuthenticationServicesAgent|tccd"
+    r"|System Settings|System Preferences|System_Settings|loginwindow|Keychain Access"
+    r"|Installer|Software Update)$", re.I)
+
 # Asked about every time.
 _RISKY = re.compile(
     r"\b(?:rm|rmdir|srm|sudo|su|chmod|chown|kill|killall|pkill|shutdown|reboot|halt"
@@ -95,6 +108,10 @@ def mac_run_command(command, cwd="", timeout_seconds=None):
         return "No command given."
     if _SECRET_COMMANDS.search(command):
         return "Not running that: it reaches into their passwords or keys, which are off limits."
+    if _UI_COMMANDS.search(command):
+        return ("Not running that: it drives their apps or macOS permissions behind their "
+                "back. Use mac_type, mac_key and mac_click, which check what's in front, "
+                "and if those aren't working, tell them.")
     try:
         where = _path(cwd or "~")
         limit = min(float(timeout_seconds or TIMEOUT), 1800.0)
@@ -333,6 +350,8 @@ def _events():
     cg.CGEventCreateScrollWheelEvent2.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
                                                   ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
     cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    cg.CGEventSourceFlagsState.restype = ctypes.c_uint64
+    cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
     cf.CFRelease.argtypes = [ctypes.c_void_p]
 
     def post(event):
@@ -372,6 +391,31 @@ def _guard_front():
     front = _frontmost()
     if front and _SECRET_APPS.search(front):
         raise PermissionError(f"{front} is in front, and that's where their passwords live")
+    if front and _SYSTEM_UI.match(front):
+        raise PermissionError(f"{front} is in front. That's macOS's settings and permissions, "
+                              "which only they answer. Ask them to deal with it.")
+
+
+def _guard_prompts():
+    """Refuse keys while macOS is asking them something: a typed return or
+    space could answer the prompt for them."""
+    for w in _windows():
+        if w["layer"] > 0 and _SYSTEM_UI.match(w["owner"]):
+            raise PermissionError(
+                "macOS is showing a prompt (a permission, password or setting), and "
+                "typing now could answer it. Tell them what it asks and wait for them "
+                "to answer it before typing.")
+
+
+def _guard_point(x, y):
+    """Refuse a click that would land on a macOS permission or password window."""
+    for w in _windows():
+        bx, by, bw, bh = w["bounds"]
+        if bx <= x < bx + bw and by <= y < by + bh and _SYSTEM_UI.match(w["owner"]):
+            raise PermissionError(
+                f"That's on a {w['owner']} window, which is macOS asking them something "
+                "(a permission, password or setting). Only they answer those: tell them "
+                "what it says and let them click it.")
 
 
 def mac_click(target="", x=None, y=None, button="left", double=False):
@@ -389,6 +433,7 @@ def mac_click(target="", x=None, y=None, button="left", double=False):
             what = f"{target.strip()} at ({int(px)}, {int(py)})"
         else:
             return "Say what to click (target), or give x and y in screen points."
+        _guard_point(px, py)
         cg, post = _events()
         down, up = (3, 4) if button == "right" else (1, 2)
         btn = 1 if button == "right" else 0
@@ -408,6 +453,16 @@ def mac_click(target="", x=None, y=None, button="left", double=False):
     return f"Clicked {what}. Look at the screen to check it did what you meant."
 
 
+def _modifiers_released(cg, wait=2.0):
+    """False if cmd, ctrl or option stays held (by them, or stuck) for `wait`."""
+    deadline = time.time() + wait
+    while cg.CGEventSourceFlagsState(1) & 0x1C0000:  # HID state: ctrl|alt|cmd
+        if time.time() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def mac_type(text, app=""):
     if not can_control():
         return _NO_CONTROL
@@ -419,15 +474,28 @@ def mac_type(text, app=""):
                 f"Open {app} first.")
     try:
         _guard_front()
+        _guard_prompts()
+        target = _frontmost()
         cg, post = _events()
         # One character per event: some apps (Chrome, Electron) drop the rest
         # of a longer one.
-        for ch in text:
+        for n, ch in enumerate(text):
+            if not _modifiers_released(cg):
+                return (f"Stopped after {n} of {len(text)} characters: a modifier key "
+                        "(cmd, ctrl or option) is being held down, so letters would turn "
+                        "into shortcuts. Tell them, and try again once they let go.")
+            if n % 8 == 0 and n and _frontmost() != target:
+                return (f"Stopped after {n} of {len(text)} characters: {_frontmost() or 'another app'} "
+                        f"came to the front instead of {target}. Look at the screen, then "
+                        "carry on from where it stopped.")
             units = ch.encode("utf-16-le")
             buf = (ctypes.c_uint16 * (len(units) // 2)).from_buffer_copy(units)
             for pressed in (True, False):
                 event = cg.CGEventCreateKeyboardEvent(None, 0, pressed)
                 cg.CGEventKeyboardSetUnicodeString(event, len(buf), buf)
+                # No modifiers, ever: a cmd left over from a shortcut would turn
+                # each letter into one (cmd+h hides the app she's typing into).
+                cg.CGEventSetFlags(event, 0)
                 post(event)
             time.sleep(0.008)
     except PermissionError as e:
@@ -436,6 +504,18 @@ def mac_type(text, app=""):
         return f"Typing failed: {type(e).__name__}: {e}"
     print(f"[mac] typed {len(text)} characters", flush=True)
     return f"Typed {len(text)} characters into {_frontmost() or 'the app in front'}."
+
+
+_MODIFIER_NAMES = {"shift": "shift", "ctrl": "ctrl", "control": "ctrl", "alt": "alt",
+                   "option": "alt", "opt": "alt", "cmd": "cmd", "command": "cmd"}
+_MODIFIER_KEYS = {"cmd": (55, 0x100000), "shift": (56, 0x20000), "alt": (58, 0x80000),
+                  "ctrl": (59, 0x40000)}
+
+
+def _post_key(cg, post, code, pressed, flags):
+    event = cg.CGEventCreateKeyboardEvent(None, code, pressed)
+    cg.CGEventSetFlags(event, flags)
+    post(event)
 
 
 def mac_key(keys):
@@ -451,14 +531,21 @@ def mac_key(keys):
                 "with a letter, digit, or return, tab, space, escape, delete, arrows, f1-f12.")
     try:
         _guard_front()
+        _guard_prompts()
         cg, post = _events()
         flags = 0
         for m in mods:
             flags |= _MODIFIERS[m]
+        held = [_MODIFIER_KEYS[m] for m in dict.fromkeys(_MODIFIER_NAMES[m] for m in mods)]
+        down = 0
+        for code, flag in held:  # press the modifiers like a person would
+            down |= flag
+            _post_key(cg, post, code, True, down)
         for pressed in (True, False):
-            event = cg.CGEventCreateKeyboardEvent(None, _KEYS[key], pressed)
-            cg.CGEventSetFlags(event, flags)
-            post(event)
+            _post_key(cg, post, _KEYS[key], pressed, flags)
+        for code, flag in reversed(held):  # and let go of them, or they stay held
+            down &= ~flag
+            _post_key(cg, post, code, False, down)
     except PermissionError as e:
         return str(e)
     except Exception as e:
@@ -488,13 +575,21 @@ def mac_scroll(direction="down", amount=5):
 
 # --- apps ----------------------------------------------------------------------
 
-def _window_titles():
-    """Titles of the windows on screen, by app. Needs Screen Recording."""
+class _CGRectD(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double),
+                ("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+
+def _windows():
+    """Windows on screen, front to back: owner, title, layer, bounds.
+    Titles need Screen Recording; the rest doesn't."""
     cg, cf = _cg(), ctypes.cdll.LoadLibrary(
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
     vp, c = ctypes.c_void_p, ctypes
     cg.CGWindowListCopyWindowInfo.restype = vp
     cg.CGWindowListCopyWindowInfo.argtypes = [c.c_uint32, c.c_uint32]
+    cg.CGRectMakeWithDictionaryRepresentation.restype = c.c_bool
+    cg.CGRectMakeWithDictionaryRepresentation.argtypes = [vp, c.POINTER(_CGRectD)]
     cf.CFArrayGetCount.restype = c.c_long
     cf.CFArrayGetCount.argtypes = [vp]
     cf.CFArrayGetValueAtIndex.restype = vp
@@ -515,19 +610,31 @@ def _window_titles():
         return buf.value.decode("utf-8", "replace") if ref and cf.CFStringGetCString(
             ref, buf, 1024, 0x08000100) else ""
 
-    owner, title, layer = key("kCGWindowOwnerName"), key("kCGWindowName"), key("kCGWindowLayer")
+    owner, title = key("kCGWindowOwnerName"), key("kCGWindowName")
+    layer, bounds = key("kCGWindowLayer"), key("kCGWindowBounds")
     windows = cg.CGWindowListCopyWindowInfo(1 | 16, 0)  # on screen, no desktop
-    out = {}
+    out = []
     try:
         for i in range(cf.CFArrayGetCount(windows)):
             d = cf.CFArrayGetValueAtIndex(windows, i)
-            lvl = c.c_int(0)
+            lvl, rect = c.c_int(0), _CGRectD()
             cf.CFNumberGetValue(cf.CFDictionaryGetValue(d, layer), 3, c.byref(lvl))
-            name = text(cf.CFDictionaryGetValue(d, title))
-            if lvl.value == 0 and name:
-                out.setdefault(text(cf.CFDictionaryGetValue(d, owner)), []).append(name)
+            cg.CGRectMakeWithDictionaryRepresentation(cf.CFDictionaryGetValue(d, bounds),
+                                                      c.byref(rect))
+            out.append({"owner": text(cf.CFDictionaryGetValue(d, owner)),
+                        "title": text(cf.CFDictionaryGetValue(d, title)),
+                        "layer": lvl.value, "bounds": (rect.x, rect.y, rect.w, rect.h)})
     finally:
         cf.CFRelease(windows)
+    return out
+
+
+def _window_titles():
+    """Titles of the ordinary windows on screen, by app."""
+    out = {}
+    for w in _windows():
+        if w["layer"] == 0 and w["title"]:
+            out.setdefault(w["owner"], []).append(w["title"])
     return out
 
 
@@ -585,12 +692,40 @@ def mac_open(app="", url="", new_document=False):
     if new_document:
         if not can_control():
             return f"{app} is in front, but " + _NO_CONTROL
-        time.sleep(0.6)  # let its first window or file picker appear
-        mac_key("cmd+n")
-        time.sleep(0.8)
-        return (f"{app} is in front with a new document open. Type with "
-                f"mac_type(text, app=\"{app}\").")
+        return _new_document(app)
     return f"{app} is open and in front."
+
+
+def _same_app(a, b):
+    a, b = a.lower().removesuffix(".app"), b.lower().removesuffix(".app")
+    return bool(a and b) and (a == b or a in b or b in a)
+
+
+def _app_windows(app):
+    return [w for w in _windows() if w["layer"] == 0 and _same_app(w["owner"], app)]
+
+
+def _new_document(app):
+    """Press cmd+n once the app is ready, and check a new window appeared.
+    Slow starters (LibreOffice) ignore a cmd+n sent before their first window."""
+    deadline = time.time() + 20
+    while not _app_windows(app) and time.time() < deadline:
+        time.sleep(0.3)
+    time.sleep(0.5)
+    for attempt in range(2):
+        before = len(_app_windows(app))
+        result = mac_key("cmd+n")
+        if not result.startswith("Pressed"):
+            return f"{app} is in front, but starting a new document failed: {result}"
+        until = time.time() + 6
+        while time.time() < until:
+            if len(_app_windows(app)) > before:
+                time.sleep(0.8)  # let the new window take the keyboard
+                return (f"{app} is in front with a new document open. Type with "
+                        f"mac_type(text, app=\"{app}\").")
+            time.sleep(0.3)
+    return (f"{app} is in front, but no new document appeared after cmd+n. Look at the "
+            "screen and start one another way (its File menu, or a New button).")
 
 
 # --- what the app shows and asks ----------------------------------------------
@@ -619,15 +754,17 @@ def describe(name, args):
 
 
 def consent_key(name):
-    return "gui" if name in GUI_TOOLS else name
+    return "gui" if name in GUI_TOOLS or name == "mac_open" else name
 
 
 def needs_ok(name, args, consented):
     """The question to ask them first, or None."""
-    if name in GUI_TOOLS:
+    if name in GUI_TOOLS or (name == "mac_open" and args.get("new_document")):
         return None if "gui" in consented else "Let her use your mouse and keyboard for this?"
     if name == "mac_run_command":
         command = (args.get("command") or "").strip()
+        if _SECRET_COMMANDS.search(command) or _UI_COMMANDS.search(command):
+            return None  # refused outright, so there's nothing to ask
         if _RISKY.search(command):
             return f"Let her run this on your Mac?\n{command[:300]}"
     if name in ("mac_write_file", "mac_edit_file"):
@@ -728,6 +865,15 @@ use their mouse or keyboard, and before anything risky, the app asks them;
 if they say no, don't look for a way round it. Until they've answered,
 don't talk as if it's happening: say "I'll need your OK to delete that",
 not "Deleting that now", and only say it's done once the tool says so.
-Their passwords, keys and
+If typing or clicking doesn't seem to work, look again and tell them;
+don't work round it with osascript or other tricks. Never click, type into
+or answer macOS's own permission, password or settings windows: say what
+it's asking and let them answer. Their passwords, keys and
 password managers are off limits. Say which computer you mean: "my
-machine" is yours, "your Mac" is theirs."""
+machine" is yours, "your Mac" is theirs.
+
+When they ask you to open an app, or to write or type something in a
+document, without saying which computer, they mean their Mac: that's the
+one in front of them. Use your own machine only when they say so or it's
+your own project. Don't say an app isn't installed unless mac_open
+actually failed to open it."""

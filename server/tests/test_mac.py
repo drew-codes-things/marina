@@ -44,3 +44,63 @@ def test_secrets_and_outside_home_are_refused():
 def test_home_paths_are_fine():
     assert mac._path("~/Documents/notes.txt") == Path.home() / "Documents" / "notes.txt"
     assert mac._path("Documents") == Path.home() / "Documents"
+
+
+@pytest.mark.parametrize("command", [
+    "osascript -e 'tell application \"System Events\" to keystroke \"hi\"'",
+    "osascript -e 'tell app \"System Events\" to key code 36'",
+    "tccutil reset Accessibility com.example.app",
+    "osascript -e 'do shell script \"ls\" with administrator privileges'",
+])
+def test_ui_scripting_and_permission_tricks_are_refused(command):
+    assert "Not running that" in mac.mac_run_command(command)
+
+
+def test_starting_a_new_document_asks_like_typing():
+    assert mac.needs_ok("mac_open", {"app": "TextEdit", "new_document": True}, set())
+    assert mac.needs_ok("mac_open", {"app": "TextEdit"}, set()) is None
+    assert mac.consent_key("mac_open") == mac.consent_key("mac_type")
+
+
+def test_clicks_on_macos_permission_windows_are_refused(monkeypatch):
+    monkeypatch.setattr(mac, "_windows", lambda: [
+        {"owner": "UserNotificationCenter", "title": "", "layer": 1000,
+         "bounds": (500, 300, 400, 200)},
+        {"owner": "TextEdit", "title": "Untitled", "layer": 0, "bounds": (0, 0, 1400, 900)},
+    ])
+    with pytest.raises(PermissionError):
+        mac._guard_point(600, 400)
+    mac._guard_point(100, 100)  # the document underneath is fine
+
+
+def test_typing_never_carries_modifiers(monkeypatch):
+    flags = []
+
+    class FakeCG:
+        def CGEventCreateKeyboardEvent(self, src, code, down):
+            return object()
+
+        def CGEventKeyboardSetUnicodeString(self, event, n, buf):
+            pass
+
+        def CGEventSetFlags(self, event, value):
+            flags.append(value)
+
+        def CGEventSourceFlagsState(self, state):
+            return 0
+
+    monkeypatch.setattr(mac, "can_control", lambda: True)
+    monkeypatch.setattr(mac, "_frontmost", lambda: "TextEdit")
+    monkeypatch.setattr(mac, "_events", lambda: (FakeCG(), lambda e: None))
+    monkeypatch.setattr(mac, "_windows", lambda: [])
+    mac.mac_type("Hi!", app="TextEdit")
+    assert flags and set(flags) == {0}
+
+
+def test_no_typing_while_macos_is_asking_something(monkeypatch):
+    monkeypatch.setattr(mac, "can_control", lambda: True)
+    monkeypatch.setattr(mac, "_frontmost", lambda: "TextEdit")
+    monkeypatch.setattr(mac, "_windows", lambda: [
+        {"owner": "UserNotificationCenter", "title": "", "layer": 8, "bounds": (0, 0, 10, 10)}])
+    assert "prompt" in mac.mac_type("hello\n", app="TextEdit")
+    assert "prompt" in mac.mac_key("return")
