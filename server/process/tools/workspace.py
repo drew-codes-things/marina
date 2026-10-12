@@ -354,6 +354,32 @@ def list_files(path="", depth=2):
     return _clip(out) if code == 0 else out.strip()
 
 
+def describe(name, args):
+    """A few words on what a call is about to do, for the app to show."""
+    def path():
+        return args.get("path") or "projects"
+    if name == "run_command":
+        line = (args.get("command") or "").strip().splitlines()
+        return f"running `{line[0][:70]}`" if line else "running a command"
+    if name == "desktop":
+        action = args.get("action", "status")
+        if action == "set":
+            return "changing her desktop: " + ", ".join((args.get("settings") or {}).keys())
+        if action == "restart":
+            return f"restarting her {args.get('component') or 'desktop'}"
+        if action == "undo":
+            return "undoing her last desktop change"
+        return "checking her desktop settings"
+    return {
+        "read_file": f"reading {path()}",
+        "write_file": f"writing {path()}",
+        "edit_file": f"editing {path()}",
+        "list_files": f"looking through {path()}",
+        "look_at_desktop": "looking at her screen",
+        "read_terminal": "reading your shell in her terminal",
+    }.get(name)
+
+
 SPECS = [
     ("run_command", run_command, {
         "description": "Run a bash command on your own Linux machine (Debian, "

@@ -336,3 +336,37 @@ html.stage, .stage body {
 .stage #bar { width: min(560px, calc(100% - 80px)); bottom: 40px; }
 .stage #status { bottom: 14px; font-size: 12px; }
 .stage #notice { bottom: 110px; font-size: 15px; width: min(640px, calc(100% - 80px)); }
+
+/* Where she is working: her own machine, or this Mac. */
+body.working #status { opacity: 1; }
+#status[data-where="vm"] #status-text { color: #9ad7ff; }
+#status[data-where="mac"] #status-text { color: #ffcf7a; }
+#status[data-where="mac"] #dot { background: #ffb43a; }
+
+/* Asking before she does something on this Mac. */
+#ask {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(400px, calc(100% - 28px));
+  bottom: 84px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(38, 30, 12, .92);
+  border: 1px solid rgba(255, 180, 58, .55);
+  color: #fff3dd;
+  font-size: 12.5px;
+  z-index: 11;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+}
+#ask.hidden { display: none; }
+#ask-where { font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: #ffcf7a; margin-bottom: 4px; }
+#ask-text { white-space: pre-wrap; word-break: break-word; line-height: 1.4; max-height: 9em; overflow: auto; }
+#ask-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+#ask-buttons button {
+  border: 0; border-radius: 8px; padding: 6px 14px; font: inherit; cursor: pointer;
+  background: rgba(255, 255, 255, .12); color: inherit;
+}
+#ask-buttons #ask-allow { background: #ffb43a; color: #241a06; font-weight: 600; }

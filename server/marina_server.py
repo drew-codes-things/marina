@@ -27,6 +27,7 @@ from process.asr_func.recorder import Recorder
 from process.asr_func.vad import VAD
 from process.config import CONFIG_PATH, load_config
 from process.llm_funcs.llm_scr import (
+    Activity,
     active_endpoint,
     active_model,
     append_local,
@@ -48,6 +49,7 @@ from process.tts_func.engine import (
 from process.tts_func.engine import warmup as warmup_tts
 from process.text_func.speech import SentenceSplitter, split_reply
 from process import backend
+from process import confirm
 from process import openai_api
 from process import shared
 from process import config as cfg
@@ -252,6 +254,13 @@ def _stream_reply(user_text, speak=True, transcript=None, extra_system=None,
                 if limit is not None:
                     interrupted = True
                     break
+                if isinstance(delta, Activity):
+                    # What she is doing, and on whose computer, for the app
+                    # to show; or a question for them to answer.
+                    yield _ndjson({"type": "confirm" if delta.confirm else "activity",
+                                   "id": delta.confirm, "where": delta.where,
+                                   "text": delta.label})
+                    continue
                 for segment in splitter.feed(delta):
                     event = emit(segment)
                     if event:
@@ -311,7 +320,48 @@ def interrupt(body: InterruptIn):
     with _stream_lock:
         _stream["stop_at"] = max(0, body.chunks)
         stream_id = _stream["id"]
+    confirm.cancel_all()  # stopping her is a no to anything she was asking
     return {"ok": True, "id": stream_id, "heard": max(0, body.chunks)}
+
+
+class ConfirmIn(BaseModel):
+    id: str
+    ok: bool
+
+
+@app.post("/confirm")
+def confirm_answer(body: ConfirmIn):
+    """Their answer to something she asked before doing it on their Mac."""
+    known = confirm.answer(body.id, body.ok)
+    print(f"[mac] they {'allowed' if body.ok else 'refused'} it", flush=True)
+    return {"ok": known}
+
+
+class MacIn(BaseModel):
+    enabled: bool
+
+
+def _mac_status():
+    from process.tools import mac
+    return {"available": sys.platform == "darwin", "enabled": mac.available(),
+            "screen": mac.can_see(), "control": mac.can_control()}
+
+
+@app.get("/mac")
+def mac_get():
+    return _mac_status()
+
+
+@app.post("/mac")
+def mac_set(body: MacIn):
+    """Let her use this Mac, or stop. Saved to the config."""
+    cfg.set_value("mac", "enabled", body.enabled)
+    if body.enabled:
+        from process.tools import mac
+        mac.ask_for_permissions()
+    print(f"[mac] {'she can use this Mac' if body.enabled else 'she can no longer use this Mac'}",
+          flush=True)
+    return _mac_status()
 
 
 @app.post("/voice")

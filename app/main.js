@@ -269,6 +269,26 @@ let wakeOn = false;
 // menu is about to show, since the bridge owns the current choice.
 let presetState = { preset: null, presets: [] };
 
+// Whether she may use this Mac, and what macOS lets her do.
+let macState = { available: false, enabled: false, screen: false, control: false };
+
+async function fetchMac() {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/mac`, { signal: AbortSignal.timeout(1500) });
+    if (res.ok) macState = await res.json();
+  } catch {}
+}
+
+async function setMac(enabled) {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/mac`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(5000),
+    });
+    if (res.ok) macState = await res.json();
+  } catch {}
+}
+
 async function fetchPresets() {
   try {
     const res = await fetch(`${BRIDGE_URL}/preset`, { signal: AbortSignal.timeout(1500) });
@@ -301,6 +321,14 @@ function buildTray() {
           win?.webContents.send('set-openers', openersOn);
         },
       },
+      ...(macState.available ? [{
+        label: macState.enabled && !(macState.screen && macState.control)
+          ? 'Let her use this Mac (needs permissions)'
+          : 'Let her use this Mac',
+        type: 'checkbox',
+        checked: macState.enabled,
+        click: (item) => { setMac(item.checked).then(refresh); },
+      }] : []),
       {
         label: 'Listen for \u201cMarina\u201d',
         type: 'checkbox',
@@ -340,7 +368,10 @@ function buildTray() {
   };
 
   refresh();
-  tray.on('mouse-move', () => { refresh(); fetchPresets().then(refresh); });
+  tray.on('mouse-move', () => {
+    refresh();
+    Promise.all([fetchPresets(), fetchMac()]).then(refresh);
+  });
   fetchPresets().then(refresh);
   return refresh;
 }

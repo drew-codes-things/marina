@@ -13,6 +13,7 @@ Turned on by `api.key`. From the network the bridge then answers /v1/ to
 requests that carry it (see the guard in marina_server).
 """
 import json
+import re
 import time
 import uuid
 
@@ -38,6 +39,21 @@ in asterisks."""
 
 def enabled():
     return bool(KEY)
+
+
+# Her steps, shown in the chat as she works. Removed again from what she
+# reads back, so she doesn't start writing them herself.
+_STEP = "> \u2699\ufe0f "
+_STEP_LINES = re.compile(r"^> \u2699\ufe0f .*\n*", re.M)
+
+
+def _step(activity):
+    where = "on her machine" if activity.where == "vm" else "on your Mac"
+    return f"{_STEP}*{where}:* {activity.label}\n\n"
+
+
+def _unstep(content):
+    return _STEP_LINES.sub("", content).strip() if isinstance(content, str) else content
 
 
 def _text(content):
@@ -69,7 +85,9 @@ def _her(body):
     messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
     their_system = "\n\n".join(_text(m.get("content")) for m in messages
                                if m.get("role") == "system").strip()
-    chat = [{"role": m["role"], "content": m.get("content") or ""}
+    chat = [{"role": m["role"],
+             "content": _unstep(m.get("content") or "") if m["role"] == "assistant"
+             else m.get("content") or ""}
             for m in messages if m.get("role") in ("user", "assistant")]
     if not chat or chat[-1]["role"] != "user":
         return None, None, None
@@ -130,6 +148,9 @@ def mount(app):
             yield _chunk(cid, "marina", {"role": "assistant", "content": ""})
             try:
                 for piece in stream:
+                    if isinstance(piece, llm_scr.Activity) and piece.label:
+                        yield _chunk(cid, "marina", {"content": _step(piece)})
+                        continue
                     if not piece:
                         # Between tool calls. An SSE comment keeps the
                         # connection honest, so a closed tab stops her.
@@ -143,6 +164,7 @@ def mount(app):
             yield "data: [DONE]\n\n"
             reply = "".join(said).strip()
             print(f"[chat ui] marina: {reply[:120]}", flush=True)
+            # (said holds only her words; the steps went straight out.)
             _remember(user_text, reply)
 
         return StreamingResponse(events(), media_type="text/event-stream")

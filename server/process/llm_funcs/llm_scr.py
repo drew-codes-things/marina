@@ -19,6 +19,7 @@ from process.backend import mode as backend_mode
 from process.backend import model_for
 from process.backend import note_used
 from process import config
+from process import confirm
 from process import shared
 from process.config import load_config, resolve_data
 from process.memory import extract as memory_extract
@@ -89,6 +90,19 @@ def _tool_rounds():
         return 1
     rounds = int(config.setting("llm", "max_tool_rounds", 0) or 0)
     return float("inf") if rounds <= 0 else rounds
+
+
+class Activity(str):
+    """Yielded by llm_stream around tool use. It is an empty string, so a
+    caller that only joins up her words is unaffected; one that wants to show
+    what she is doing reads `label` and `where` ("vm" for her machine, "mac"
+    for theirs). With `confirm` set it is a question for them, answered at
+    POST /confirm."""
+
+    def __new__(cls, label, where, confirm=None):
+        piece = super().__new__(cls, "")
+        piece.label, piece.where, piece.confirm = label, where, confirm
+        return piece
 
 
 # The same call this many times running means she is stuck, not working.
@@ -422,6 +436,7 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
     done_rounds = 0
     last_calls = []
     nudged = False
+    consented = set()  # things they have said yes to for this reply
     while True:
         calls = {}
         said = []
@@ -473,7 +488,23 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
             ],
         }]
         for i, call in sorted(calls.items()):
-            result = tools.run(call["name"], call["arguments"])
+            name, arguments = call["name"], call["arguments"]
+            label, where = tools.describe(name, arguments)
+            if label:
+                yield Activity(label, where)
+            question = tools.needs_ok(name, arguments, consented)
+            if question:
+                ask = confirm.request(question)
+                yield Activity(question, where, confirm=ask.id)
+                if confirm.wait(ask):
+                    consented.add(tools.consent_key(name))
+                    result = tools.run(name, arguments)
+                else:
+                    print(f"[llm] they didn't allow: {question}", flush=True)
+                    result = ("They didn't allow that, so it wasn't done. Don't try "
+                              "another way round it; say so and ask what they'd like.")
+            else:
+                result = tools.run(name, arguments)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"] or f"call_{i}",

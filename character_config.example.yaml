@@ -244,6 +244,7 @@ presets:
     tools:
       clipboard: false      # never read out whatever is on your clipboard
       workspace: false      # and no shell for guests to talk her into
+      mac: false            # or this Mac's mouse, keyboard and files
     barge_in:
       enabled: false        # a busy room would keep cutting her off
 
@@ -385,3 +386,11 @@ shared:
 # to "0.0.0.0").
 api:
   key: ""
+
+# Let her use this Mac: see the screen, use apps with the mouse and
+# keyboard, run commands and edit files in your home folder. Turn it on and
+# off from her menu bar icon. She asks first before using the mouse and
+# keyboard, and before anything risky; passwords and keys are off limits.
+# macOS also has to allow Marina Screen Recording and Accessibility.
+mac:
+  enabled: false

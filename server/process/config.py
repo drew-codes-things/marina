@@ -9,6 +9,7 @@ everything falls back to the repo and development works as it always did.
 """
 from pathlib import Path
 import functools
+import json
 import os
 import re
 import shutil
@@ -98,6 +99,31 @@ def set_preset(name):
     return name
 
 
+_value_overrides = {}
+
+
+def set_value(section, key, value):
+    """Change one plain setting now and in the config file. The section is
+    added at the end if it isn't there."""
+    with _preset_lock:
+        _value_overrides[(section, key)] = value
+        text = CONFIG_PATH.read_text(encoding="utf-8")
+        literal = {True: "true", False: "false"}.get(value, json.dumps(value))
+        # The value, keeping whatever comment follows it and the space before.
+        pattern = (rf"(^{re.escape(section)}:\n(?:[ \t]+.*\n|\n)*?[ \t]+{re.escape(key)}:)"
+                   r"[ \t]*[^\n#]*?([ \t]*(?:#.*)?)$")
+        if re.search(pattern, text, re.M):
+            text = re.sub(pattern, rf"\g<1> {literal}\g<2>", text, count=1, flags=re.M)
+        elif re.search(rf"^{re.escape(section)}:\s*$", text, re.M):
+            text = re.sub(rf"^({re.escape(section)}:\s*)$", rf"\g<1>\n  {key}: {literal}",
+                          text, count=1, flags=re.M)
+        else:
+            text = text.rstrip() + f"\n\n{section}:\n  {key}: {literal}\n"
+        tmp = CONFIG_PATH.with_suffix(".yaml.tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, CONFIG_PATH)
+
+
 def system_prompt():
     return presets()[preset()]["system_prompt"]
 
@@ -107,6 +133,8 @@ def setting(section, key, default=None):
     over = (presets().get(preset()) or {}).get(section) or {}
     if key in over:
         return over[key]
+    if (section, key) in _value_overrides:
+        return _value_overrides[(section, key)]
     return (load_config().get(section) or {}).get(key, default)
 
 

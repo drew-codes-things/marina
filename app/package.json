@@ -67,7 +67,8 @@
         "LSUIElement": false,
         "NSDesktopFolderUsageDescription": "Marina needs to read her Python backend and avatar model from this folder.",
         "NSDocumentsFolderUsageDescription": "Marina needs to read her Python backend and avatar model from this folder.",
-        "NSDownloadsFolderUsageDescription": "Marina needs to read her Python backend and avatar model from this folder."
+        "NSDownloadsFolderUsageDescription": "Marina needs to read her Python backend and avatar model from this folder.",
+        "NSAppleEventsUsageDescription": "Marina controls other apps on this Mac when you let her, to work on what's on your screen."
       }
     },
     "dmg": {

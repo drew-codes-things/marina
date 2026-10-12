@@ -1347,7 +1347,7 @@ function tick() {
 
 const gl = renderer.getContext();
 const probe = new Uint8Array(4);
-const UI = ['#bar', '#chrome', '#status', '#bubble', '#picker', '#notice', '#drag-strip'];
+const UI = ['#bar', '#chrome', '#status', '#bubble', '#picker', '#notice', '#ask', '#drag-strip'];
 
 function overUI(x, y) {
   const hit = document.elementFromPoint(x, y);
@@ -1474,6 +1474,10 @@ async function post(path, body) {
 
 function setBusy(on, label) {
   busy = on;
+  if (!on) {
+    clearActivity();
+    closeAsk();
+  }
   btnSend.disabled = on;
   const see = el('btn-see');
   if (see) see.disabled = on;
@@ -1549,10 +1553,61 @@ async function playChunk(ev, req) {
   if (req.chunks === 1) armBargeIn(req);
 }
 
+// What she is doing while she works, and on whose computer.
+function showActivity(ev) {
+  const where = ev.where === 'mac' ? 'your Mac' : 'her machine';
+  document.body.classList.add('working');
+  el('status').dataset.where = ev.where || '';
+  setStatus('busy', `${where} \u00b7 ${ev.text}`);
+}
+
+function clearActivity() {
+  document.body.classList.remove('working');
+  delete el('status').dataset.where;
+}
+
+// She wants to do something on this Mac that needs their OK.
+let askId = null;
+
+function askConfirm(ev) {
+  showActivity({ where: ev.where, text: 'waiting for you' });
+  askId = ev.id;
+  el('ask-where').textContent = ev.where === 'mac' ? 'On your Mac' : 'On her machine';
+  el('ask-text').textContent = ev.text;
+  el('ask').classList.remove('hidden');
+  el('ask-allow').focus();
+}
+
+function closeAsk() {
+  askId = null;
+  el('ask').classList.add('hidden');
+}
+
+function answerAsk(ok) {
+  if (!askId) return;
+  const id = askId;
+  closeAsk();
+  post('/confirm', { id, ok }).catch(() => {});
+}
+
+el('ask-allow').addEventListener('click', () => answerAsk(true));
+el('ask-deny').addEventListener('click', () => answerAsk(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && askId) { e.preventDefault(); answerAsk(false); }
+});
+
+// Events every reply stream can carry besides her words.
+function sideEvent(ev) {
+  if (ev.type === 'activity') { showActivity(ev); return true; }
+  if (ev.type === 'confirm') { askConfirm(ev); return true; }
+  return false;
+}
+
 async function consumeReply(res, req) {
   if (!res.ok) throw new Error(`bridge returned ${res.status}`);
   for await (const ev of readEvents(res)) {
     if (req.cancelled) continue;
+    if (sideEvent(ev)) continue;
     if (ev.type === 'chunk') await playChunk(ev, req);
     else if (ev.type === 'start' && req.voice && ev.transcript) showHeard(ev.transcript);
     else if (ev.type === 'error') showNotice(ev.message, 'bridge');
@@ -1606,6 +1661,7 @@ async function armBargeIn(req) {
     const next = { cancelled: false, text: '', chunks: 0, barge: null };
 
     for await (const ev of readEvents(res)) {
+      if (sideEvent(ev)) continue;
       if (ev.type === 'disabled') { bargeEnabled = false; return; }
       if (ev.type === 'speech') {
         req.tookOver = true;
@@ -1798,6 +1854,7 @@ async function consumeVoice(res, req, onWake) {
   if (!res.ok) throw new Error(`bridge returned ${res.status}`);
   for await (const ev of readEvents(res)) {
     if (req.cancelled) continue;
+    if (sideEvent(ev)) continue;
     if (ev.type === 'wake') {
       onWake?.();
       showListening(true);

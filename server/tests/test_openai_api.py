@@ -68,3 +68,24 @@ def test_last_message_must_be_theirs(monkeypatch):
     r = client(monkeypatch).post("/v1/chat/completions", json={
         "model": "marina", "messages": [{"role": "assistant", "content": "hi"}]})
     assert r.status_code == 400
+
+
+def test_steps_are_shown_and_not_fed_back(monkeypatch):
+    def working(user_input=None, extra_system=None, use_tools=True, history=None):
+        seen.update(history=history)
+        yield llm_scr.Activity("running `ls`", "vm")
+        yield ""
+        yield "done"
+
+    monkeypatch.setattr(llm_scr, "llm_stream", working)
+    monkeypatch.setattr(openai_api, "_remember", lambda *a: None)
+    app = FastAPI()
+    openai_api.mount(app)
+    r = TestClient(app).post("/v1/chat/completions", json={"model": "marina", "stream": True,
+        "messages": [{"role": "user", "content": "a"},
+                     {"role": "assistant", "content": "> ⚙️ *on her machine:* running `pwd`\n\nok"},
+                     {"role": "user", "content": "b"}]})
+    text = "".join(json.loads(l[6:])["choices"][0]["delta"].get("content", "")
+                   for l in r.text.splitlines() if l.startswith("data: {"))
+    assert "*on her machine:* running `ls`" in text and text.endswith("done")
+    assert seen["history"][1]["content"] == "ok"

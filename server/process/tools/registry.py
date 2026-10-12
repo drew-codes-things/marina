@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from process.config import load_config, setting
 from process.memory import store as memory
+from process.tools import mac
 from process.tools import workspace
 
 _config = load_config()
@@ -160,19 +161,61 @@ SPECS = [
 
 SPECS += [(name, fn, _workspace_allowed, spec) for name, fn, spec in workspace.SPECS]
 
+
+def _mac_allowed():
+    return mac.available() and _allowed("mac")
+
+
+SPECS += [(name, fn, _mac_allowed, spec) for name, fn, spec in mac.SPECS]
+_MAC_TOOLS = {name for name, *_ in mac.SPECS}
+
 _HANDLERS = {name: (fn, on) for name, fn, on, _ in SPECS}
+
+
+def _args(arguments):
+    try:
+        args = json.loads(arguments) if isinstance(arguments, str) else (arguments or {})
+    except json.JSONDecodeError:
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+_WORKSPACE_TOOLS = {name for name, *_ in workspace.SPECS}
+
+
+def describe(name, arguments):
+    """(label, where) for a tool call the app should show, else (None, None).
+    where is "vm" for her machine, "mac" for theirs."""
+    args = _args(arguments)
+    if name in _WORKSPACE_TOOLS:
+        return workspace.describe(name, args), "vm"
+    if name in _MAC_TOOLS:
+        return mac.describe(name, args), "mac"
+    return None, None
+
+
+def needs_ok(name, arguments, consented):
+    """A question to put to them before running this call, or None."""
+    if name in _MAC_TOOLS:
+        return mac.needs_ok(name, _args(arguments), consented)
+    return None
+
+
+def consent_key(name):
+    return mac.consent_key(name) if name in _MAC_TOOLS else name
 
 
 def prompt_addition():
     """What she needs to know about tools that the definitions don't say."""
-    if _allowed("enabled") and _workspace_allowed():
-        return workspace.PROMPT
-    return ""
+    if not _allowed("enabled"):
+        return ""
+    return ((workspace.PROMPT if _workspace_allowed() else "")
+            + (mac.PROMPT if _mac_allowed() else ""))
 
 
 def wants_long_loop():
-    """Workspace tasks take many calls in a row; the rest take one."""
-    return _allowed("enabled") and _workspace_allowed()
+    """Work on a machine takes many calls in a row; the rest take one."""
+    return _allowed("enabled") and (_workspace_allowed() or _mac_allowed())
 
 
 def definitions():
