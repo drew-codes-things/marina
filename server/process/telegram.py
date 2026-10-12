@@ -67,7 +67,12 @@ to something they told you, or just checking in on a thing they mentioned.
 Don't greet them formally, don't offer help, don't ask what they're up to
 in a generic way, and don't repeat anything already said above."""
 
-_session = requests.Session()
+# Long polling gets a session of its own. Everything else opens a fresh
+# connection: home routers drop idle connections without telling either
+# end, and a send on a pooled connection that has quietly died just hangs
+# until its timeout.
+_poll_session = requests.Session()
+POLL_SECONDS = 25
 _turn = threading.Lock()
 _last_text_at = time.time()
 _unprompted_at = []
@@ -79,12 +84,25 @@ def enabled():
 
 def _call(method, timeout=30, **params):
     files = params.pop("files", None)
-    try:
-        r = _session.post(f"{API}/{method}", data=params, files=files, timeout=timeout)
-        body = r.json()
-    except (requests.RequestException, ValueError) as e:
-        print(f"[telegram] {method} failed: {type(e).__name__}", flush=True)
-        return None
+    body = None
+    for attempt in range(2):
+        try:
+            r = requests.post(f"{API}/{method}", data=params, files=files,
+                              timeout=(5, timeout), headers={"Connection": "close"})
+            body = r.json()
+            break
+        except requests.ConnectionError as e:
+            # Never reached Telegram, so trying again can't send it twice.
+            if attempt == 0:
+                if files:
+                    for f in files.values():
+                        f[1].seek(0)
+                continue
+            print(f"[telegram] {method} failed: {type(e).__name__}", flush=True)
+            return None
+        except (requests.RequestException, ValueError) as e:
+            print(f"[telegram] {method} failed: {type(e).__name__}", flush=True)
+            return None
     if not body.get("ok"):
         print(f"[telegram] {method}: {body.get('description')}", flush=True)
         return None
@@ -221,8 +239,8 @@ def _transcribe_voice(message, transcribe):
     if not info or not transcribe:
         return ""
     try:
-        r = _session.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}",
-                         timeout=60)
+        r = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}",
+                         timeout=(5, 60))
         r.raise_for_status()
     except requests.RequestException as e:
         print(f"[telegram] could not fetch voice note: {type(e).__name__}", flush=True)
@@ -289,15 +307,20 @@ def _handle(message, transcribe, synthesize):
 def _poll(transcribe, synthesize):
     offset = None
     while True:
-        params ={"timeout": 60, "allowed_updates": '["message"]'}
+        params = {"timeout": POLL_SECONDS, "allowed_updates": '["message"]'}
         if offset:
             params["offset"] = offset
         try:
-            r = _session.post(f"{API}/getUpdates", data=params, timeout=75)
+            r = _poll_session.post(f"{API}/getUpdates", data=params,
+                                   timeout=(5, POLL_SECONDS + 10))
             updates = r.json().get("result") or []
         except (requests.RequestException, ValueError) as e:
-            print(f"[telegram] polling failed ({type(e).__name__}), retrying", flush=True)
-            time.sleep(5)
+            # A dropped long poll is routine on home networks; start a clean
+            # connection and carry on.
+            if not isinstance(e, requests.ReadTimeout):
+                print(f"[telegram] polling failed ({type(e).__name__}), retrying", flush=True)
+            _poll_session.close()
+            time.sleep(2)
             continue
         for update in updates:
             offset = update["update_id"] + 1
@@ -363,7 +386,7 @@ def start(transcribe=None, synthesize=None):
     `synthesize(text) -> (wav bytes, visemes)` come from the bridge."""
     if not enabled():
         return False
-    me = _call("getMe")
+    me = _call("getMe", timeout=15)
     if not me:
         print("[telegram] the bot token was refused, so texting is off", flush=True)
         return False
