@@ -2117,8 +2117,29 @@ async function openPicker() {
         data.preset === p.name,
         async () => { closePicker(); await switchPreset(p.name); }));
     }
-    pickGroup(list, 'Brain');
   }
+
+  const mac = await fetch(`${BRIDGE}/mac`).then((r) => r.json()).catch(() => null);
+  if (mac?.available) {
+    pickGroup(list, 'This Mac');
+    const missing = mac.enabled && !(mac.screen && mac.control);
+    list.appendChild(pickItem(
+      missing ? 'Let her use it (needs permissions)' : 'Let her use it',
+      mac.enabled
+        ? 'She can see your screen and use your apps, asking you first. Click to turn off.'
+        : 'Let her see your screen and use your apps, asking you first',
+      mac.enabled,
+      async () => {
+        const res = await post('/mac', { enabled: !mac.enabled }).catch(() => null);
+        if (res?.enabled && !(res.screen && res.control)) {
+          showNotice('Allow Marina under System Settings → Privacy & Security → '
+            + 'Screen Recording and Accessibility, then reopen her.');
+        }
+        openPicker();
+      },
+    ));
+  }
+  if (data.presets?.length > 1 || mac?.available) pickGroup(list, 'Brain');
 
   list.appendChild(pickItem(
     'Automatic', `Try ${backends.map((b) => b.label).join(', then ')}`,

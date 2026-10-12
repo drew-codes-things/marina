@@ -373,6 +373,12 @@ function buildTray() {
     Promise.all([fetchPresets(), fetchMac()]).then(refresh);
   });
   fetchPresets().then(refresh);
+  // The bridge takes a while to start, so keep asking until it answers.
+  const poll = setInterval(async () => {
+    await fetchMac();
+    if (macState.available) { clearInterval(poll); fetchPresets().then(refresh); }
+  }, 2000);
+  setTimeout(() => clearInterval(poll), 120000);
   return refresh;
 }
 
