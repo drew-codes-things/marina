@@ -7,7 +7,7 @@ import json
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from process import shared
 from process.config import resolve_data
@@ -175,8 +175,40 @@ def local_clear():
         save({"facts": []})
 
 
-def as_prompt_block():
-    facts = all_facts()
+_MONTHS = ("january february march april may june july august september october "
+           "november december").split()
+_DAY_MONTH = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?(?:\s+of)?\s+(" + "|".join(_MONTHS) + r")\b"
+    r"|\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2})(?:st|nd|rd|th)?\b", re.I)
+_ANNUAL = re.compile(r"birthday|anniversary|\bborn\b", re.I)
+
+
+def _yearly_date(text):
+    """(month, day) of a birthday or anniversary fact, else None."""
+    if not _ANNUAL.search(text):
+        return None
+    m = _DAY_MONTH.search(text)
+    if not m:
+        return None
+    day, month = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+    return _MONTHS.index(month.lower()) + 1, int(day)
+
+
+def _for_today(facts, today):
+    """Birthdays and anniversaries only on the day itself: the rest of the
+    year she'd bring them up anyway ("happy belated birthday week")."""
+    out = []
+    for f in facts:
+        when = _yearly_date(f["text"])
+        if when is None:
+            out.append(f)
+        elif when == (today.month, today.day):
+            out.append({**f, "text": f["text"] + " (that's today)"})
+    return out
+
+
+def as_prompt_block(today=None):
+    facts = _for_today(all_facts(), today or date.today())
     if not facts:
         return ""
 
