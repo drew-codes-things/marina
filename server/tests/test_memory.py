@@ -17,6 +17,9 @@ REJECT = [
     "I love this song",
     "what is on the clipboard?",
     "no",
+    "The user wants to open YouTube in Chrome",
+    "The user wants YouTube opened in Chrome and a text document created for cake instructions.",
+    "The user asked for the time in Tokyo",
 ]
 ACCEPT = [
     "The user's name is Jacob",
@@ -25,6 +28,8 @@ ACCEPT = [
     "Jacob works as a software engineer",
     "The user has a cat named Milo",
     "Jacob lives in the UK",
+    "The user wants to be called Sam",
+    "The user wants to learn Rust",
 ]
 
 

@@ -85,12 +85,16 @@ _INSTRUCTION = re.compile(
 _EPHEMERAL = re.compile(
     r"\b(currently|right now|at the moment|just now|is talking to|"
     r"is chatting|today|this (morning|afternoon|evening|session))\b", re.I)
+_REQUEST = re.compile(
+    r"^the user (asked|requested|is asking|is requesting|"
+    r"wants (me )?to (open|play|show|tell|find|search|check|look)\b|"
+    r"wants .*\b(opened|played|created|shown|written)\b)", re.I)
 _SELF = re.compile(r"^(i|i'?m|i'?ve|marina|my|we|us|our)\b", re.I)
 
 
 def _is_durable_fact(text):
-    """Reject instructions, passing state, questions and the model talking
-    about itself."""
+    """Reject instructions, requests, passing state, questions and the model
+    talking about itself."""
     t = text.strip()
     if len(t) < 8 or len(t) > 200:
         return False
@@ -98,7 +102,7 @@ def _is_durable_fact(text):
         return False
     if _INSTRUCTION.match(t):
         return False
-    if _EPHEMERAL.search(t):
+    if _EPHEMERAL.search(t) or _REQUEST.match(t):
         return False
     if _SELF.match(t):
         return False
