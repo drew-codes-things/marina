@@ -20,6 +20,8 @@ llm:
   # Rounds of tool calls one reply may take, 0 for no limit. Only matters with the
   # workspace on, where a task is a chain of them: run, read, fix, rerun.
   max_tool_rounds: 0         # 0: no limit
+  # timeout_seconds: 30      # how long to wait for the first words. Raise it on a slow
+  #                          # CPU: the first reply has to read her whole prompt
 
   # Backups. With mode: auto she uses the first of these that answers, in
   # order: base_url, then each extra_backends entry, then fallback_base_url.
@@ -251,6 +253,7 @@ presets:
       clipboard: false      # never read out whatever is on your clipboard
       workspace: false      # and no shell for guests to talk her into
       mac: false            # or this Mac's mouse, keyboard and files
+      computer: false       # or this computer's, on Linux
     barge_in:
       enabled: false        # a busy room would keep cutting her off
 
@@ -399,4 +402,14 @@ api:
 # keyboard, and before anything risky; passwords and keys are off limits.
 # macOS also has to allow Marina Screen Recording and Accessibility.
 mac:
+  enabled: false
+
+# The same on Linux: see the screen, use apps with the mouse and keyboard, run
+# commands and edit files in your home folder, with the same asking first.
+# Seeing the screen needs a screenshot tool (spectacle, gnome-screenshot, grim
+# or scrot). On Wayland the mouse and keyboard go through the desktop's
+# RemoteDesktop portal, which asks you once; X11 uses xdotool, and ydotool is
+# the fallback. Under Wayland she can't tell which window is in front (except
+# on KDE with kdotool installed).
+computer:
   enabled: false

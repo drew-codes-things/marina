@@ -1,0 +1,16 @@
+faster-whisper>=1.0.3     # ASR (ctranslate2 + av; CPU only, no torch)
+av<19                     # 19 dropped an argument faster-whisper 1.2 passes
+openai>=1.40              # LLM client - also speaks to Ollama/llama.cpp
+requests>=2.31            # HTTP
+PyYAML>=6.0               # config
+fastapi>=0.115            # local bridge
+uvicorn>=0.30             # local bridge
+python-multipart>=0.0.9   # file uploads on /voice
+
+sounddevice>=0.4.6
+soundfile>=0.12
+numpy>=1.26
+
+kokoro-onnx>=0.4.7
+pillow>=10.0             # screenshots for her "use this computer" tools
+jeepney>=0.9            # the desktop's RemoteDesktop portal: mouse and keyboard on Wayland
