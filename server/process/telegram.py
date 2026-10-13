@@ -8,6 +8,7 @@ that is set, is told their chat id and nothing more.
 Run it on one always-on bridge only. Two bridges polling the same bot steal
 each other's messages.
 """
+import difflib
 import html
 import io
 import random
@@ -21,7 +22,7 @@ import requests
 
 from process import idle
 from process.config import load_config, setting
-from process.llm_funcs.llm_scr import llm_stream, reset_history, save_turn
+from process.llm_funcs.llm_scr import llm_stream, load_history, reset_history, save_turn
 from process.text_func.speech import split_reply
 from process.tools import registry as tools
 
@@ -207,8 +208,86 @@ def _send_voice(chat, reply, synthesize):
                  files={"voice": ("marina.ogg", ogg, "audio/ogg")}) is not None
 
 
-def _generate(user_text, extra):
-    return "".join(llm_stream(user_text, extra_system=TEXTING + extra)).strip()
+# How far back she checks herself for repeats, how alike two texts have to
+# be to count as the same one, and how many words in a row make a phrase.
+RECENT_REPLIES = 8
+SAME_TEXT = 0.75
+PHRASE_WORDS = 5
+
+AGAIN = """
+
+(Note from the app, not from them. Never mention it. Your texts have been
+falling into a groove and this one did it again: {phrases}. Answer what
+they just said, as yourself, but don't use those words again.)"""
+
+
+def _generate(user_text, extra, note=""):
+    """Her reply, and whether she used any tools on the way."""
+    if user_text is None:
+        pieces = list(llm_stream(None, extra_system=TEXTING + extra + note))
+    else:
+        pieces = list(llm_stream(user_text + note, extra_system=TEXTING + extra))
+    # Text only ever arrives in non-empty pieces; the empty ones mark tool use.
+    return "".join(pieces).strip(), any(p == "" for p in pieces)
+
+
+def _words(text):
+    return re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
+
+
+def _recent_replies():
+    try:
+        history = load_history()
+    except Exception:
+        return []
+    return [m["content"] for m in history
+            if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+            ][-RECENT_REPLIES:]
+
+
+def _repeats(reply, recent):
+    """What in this reply she has already been saying: a whole text she
+    sent before, or a phrase from one, or a phrase she loops within it."""
+    words = _words(reply)
+    if len(words) < PHRASE_WORDS:
+        return []  # "lol" twice is just texting
+    text = " ".join(words)
+    found = []
+    for earlier in map(_words, recent):
+        if difflib.SequenceMatcher(None, text, " ".join(earlier),
+                                   autojunk=False).ratio() >= SAME_TEXT:
+            found.append(" ".join(earlier[:12]))
+            continue
+        blocks = difflib.SequenceMatcher(None, words, earlier, autojunk=False)
+        for b in blocks.get_matching_blocks():
+            if b.size >= PHRASE_WORDS:
+                found.append(" ".join(words[b.a:b.a + min(b.size, 12)]))
+    grams = [" ".join(words[i:i + PHRASE_WORDS]) for i in range(len(words) - PHRASE_WORDS + 1)]
+    found += [g for i, g in enumerate(grams) if g in grams[:i]]
+    unique = []
+    for phrase in sorted(set(found), key=len, reverse=True):
+        if not any(phrase in kept for kept in unique):
+            unique.append(phrase)
+    return unique
+
+
+def _compose(user_text, extra):
+    """Her reply, written once more if it repeats what she has been saying.
+    A small model falls into a groove: the same text to two different
+    messages, or one line in everything. Asking again with the repeat named
+    gets her out of it without changing how she talks."""
+    recent = _recent_replies()
+    reply, used_tools = _generate(user_text, extra)
+    worn = _repeats(reply, recent)
+    # Asking again would run her tools twice, so a reply that did things stands.
+    if not worn or used_tools:
+        return reply
+    print(f"[telegram] she repeated herself ({'; '.join(worn)}), asking again", flush=True)
+    note = AGAIN.format(phrases="; ".join(f'"{p}"' for p in worn))
+    retry, _ = _generate(user_text, extra, note)
+    if not retry or len(_repeats(retry, recent)) > len(worn):
+        return reply
+    return retry
 
 
 def _reply(chat, user_text, voice, synthesize):
@@ -216,7 +295,7 @@ def _reply(chat, user_text, voice, synthesize):
     with _turn:
         try:
             with _Typing(chat):
-                reply = _generate(user_text, VOICE_NOTE if voice else "")
+                reply = _compose(user_text, VOICE_NOTE if voice else "")
         except Exception as e:
             print(f"[telegram] reply failed: {type(e).__name__}: {e}", flush=True)
             _call("sendMessage", chat_id=chat,
@@ -354,7 +433,7 @@ def _send_unprompted(extra, record_as=None):
     global _last_text_at
     with _turn:
         try:
-            reply = _generate(None, extra)
+            reply = _compose(None, extra)
         except Exception as e:
             print(f"[telegram] unprompted text failed: {type(e).__name__}: {e}", flush=True)
             return
