@@ -2,12 +2,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
+SETUP="./setup-$([ "$(uname)" = Darwin ] && echo mac || echo linux).sh"
+sed_in_place() { if sed --version >/dev/null 2>&1; then sed -i "$@"; else sed -i '' "$@"; fi; }
 
-[ -d .venv ] || { echo "No .venv here. Run ./setup-mac.sh first." >&2; exit 1; }
+[ -d .venv ] || { echo "No .venv here. Run $SETUP first." >&2; exit 1; }
 
 CURRENT="$(.venv/bin/python -c 'import sys; print(sys.prefix)')"
 if [ "$CURRENT" != "$ROOT/.venv" ]; then
-  echo "Interpreter reports $CURRENT but we are in $ROOT. Recreate with ./setup-mac.sh" >&2
+  echo "Interpreter reports $CURRENT but we are in $ROOT. Recreate with $SETUP" >&2
   exit 1
 fi
 
@@ -24,8 +26,8 @@ for f in .venv/bin/*; do
   [ -f "$f" ] || continue
   file "$f" | grep -qE 'text|script' || continue
   if grep -q "$OLD" "$f" 2>/dev/null; then
-    sed -i '' "s|$OLD|$ROOT|g" "$f"; n=$((n+1))
+    sed_in_place "s|$OLD|$ROOT|g" "$f"; n=$((n+1))
   fi
 done
-[ -f .venv/pyvenv.cfg ] && sed -i '' "s|$OLD|$ROOT|g" .venv/pyvenv.cfg
+[ -f .venv/pyvenv.cfg ] && sed_in_place "s|$OLD|$ROOT|g" .venv/pyvenv.cfg
 echo "Repaired $n script(s). pip/uvicorn/activate should work again."

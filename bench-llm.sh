@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+SETUP="./setup-$([ "$(uname)" = Darwin ] && echo mac || echo linux).sh"
 PY="$(pwd)/.venv/bin/python"
-[ -x "$PY" ] || { echo "No venv. Run ./setup-mac.sh" >&2; exit 1; }
+[ -x "$PY" ] || { echo "No venv. Run $SETUP" >&2; exit 1; }
 
 HOST="${1:-}"
 MODEL="${2:-}"

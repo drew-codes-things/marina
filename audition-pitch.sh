@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+SETUP="./setup-$([ "$(uname)" = Darwin ] && echo mac || echo linux).sh"
 PY="$(pwd)/.venv/bin/python"
-[ -x "$PY" ] || { echo "No venv. Run ./setup-mac.sh" >&2; exit 1; }
+[ -x "$PY" ] || { echo "No venv. Run $SETUP" >&2; exit 1; }
 STEPS="${*:-0 0.5 1 1.5 2 2.5}" "$PY" - <<'PY'
 import os, sys, pathlib, yaml
 sys.path.insert(0, "server")
@@ -28,7 +29,7 @@ for i, pitch in enumerate(steps):
     for m in list(sys.modules):
         if m.startswith("process.tts_func"): del sys.modules[m]
     from process.tts_func import engine
-    fp = out / f"p{pitch:+.1f}.wav"; fp.write_bytes(engine.synthesize(LINE))
+    fp = out / f"p{pitch:+.1f}.wav"; fp.write_bytes(engine.synthesize(LINE)[0])
     audio, SR = sf.read(fp, dtype="float32")
     ann, _ = narr.create(f"Number {i}.", voice="af_heart", speed=1.0, lang="en-us")
     reel += [ann.astype(np.float32), np.zeros(int(SR*0.28), dtype=np.float32),

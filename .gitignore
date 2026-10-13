@@ -27,3 +27,5 @@ app/test/*.json
 
 app/renderer/vendor/
 character_config.yaml
+cache/
+portal_token
