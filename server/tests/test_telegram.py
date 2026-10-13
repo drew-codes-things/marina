@@ -93,3 +93,16 @@ def test_a_reply_that_used_tools_is_never_asked_for_again(monkeypatch):
     monkeypatch.setattr(telegram, "_recent_replies", lambda: [HEAVY])
     assert telegram._compose("open notes", "") == HEAVY
     assert len(calls) == 1
+
+
+def test_stage_directions_are_dropped_but_code_kept():
+    assert telegram._without_actions("*tilts head* i mean i could") == "i mean i could"
+    assert telegram._without_actions("2*3*4 is maths") == "2*3*4 is maths"
+    assert telegram._without_actions("```\nx = *y*\n```") == "```\nx = *y*\n```"
+
+
+def test_only_the_answer_after_tool_use_is_texted(monkeypatch):
+    monkeypatch.setattr(telegram, "llm_stream", lambda *a, **k: iter(
+        ["let me check what's going on, give me a sec", "", "ok disk is at 40%, all good"]))
+    reply, used = telegram._generate("check your disk", "")
+    assert used and reply == "ok disk is at 40%, all good"

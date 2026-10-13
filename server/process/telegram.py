@@ -49,6 +49,9 @@ and *actions* does not apply here. Text like a real person does:
   each part arrives as its own message, like double-texting.
 - No *actions* in asterisks. A real person doesn't narrate themselves; if
   you want to react, write it: "lmao", "ugh", "wait what".
+- Don't text that you're about to do something ("give me a sec", "let me
+  check"). If something needs checking, check it with your tools first and
+  text them what you found.
 - An emoji now and then is fine if it is the one you would actually send.
 - If they need to copy a command or a snippet, put it in ``` fences.
   Code you are building on your own machine goes there through your tools,
@@ -228,7 +231,33 @@ def _generate(user_text, extra, note=""):
     else:
         pieces = list(llm_stream(user_text + note, extra_system=TEXTING + extra))
     # Text only ever arrives in non-empty pieces; the empty ones mark tool use.
-    return "".join(pieces).strip(), any(p == "" for p in pieces)
+    used_tools = any(p == "" for p in pieces)
+    if used_tools:
+        # What she said before and between tool calls ("let me check… give
+        # me a sec") is narration; the text after the last one is her answer.
+        last = max(i for i, p in enumerate(pieces) if p == "")
+        after = "".join(pieces[last + 1:]).strip()
+        if after:
+            pieces = [after]
+    return _without_actions("".join(pieces)).strip(), used_tools
+
+
+_ACTION = re.compile(r"(?<![*\w])\*(?!\s)[^*\n`]{1,60}(?<!\s)\*(?![*\w])")
+
+
+def _without_actions(text):
+    """Drop *tilts head* style stage directions, which she still slips in
+    now and then; code fences are left alone."""
+    out, in_fence = [], False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence:
+            stripped = _ACTION.sub("", line)
+            if stripped != line:
+                line = re.sub(r"  +", " ", stripped).strip()
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out))
 
 
 def _words(text):

@@ -71,6 +71,14 @@ def _stable_context():
     return f"\n\nIt is {now:%A} {part}. Use this only if it is actually relevant."
 
 
+LET_IT_GO = (
+    "\n\nOnce you've made a joke or had your say about something, let it go: "
+    "don't keep bringing the same topic or running joke back in later "
+    "messages. When they change the subject, or say they've got it or don't "
+    "need help, follow them and don't circle back."
+)
+
+
 def system_message():
     return {
         "role": "system",
@@ -78,7 +86,8 @@ def system_message():
                     + (memory.as_prompt_block() if _recall() else "")
                     + tools.prompt_addition()
                     + _stable_context()
-                    + (ambient.NOTE_EXPLAINED if ambient.ENABLED else "")),
+                    + (ambient.NOTE_EXPLAINED if ambient.ENABLED else "")
+                    + LET_IT_GO),
     }
 
 
@@ -112,6 +121,22 @@ STUCK_REPEATS = 3
 _PROMISE = re.compile(
     r"\b(i'?ll|i will|let me|let'?s|i'?m (?:going|gonna) to|gonna|about to)\b",
     re.I)
+
+
+_REQUEST = re.compile(
+    r"\b(can you|could you|would you|will you|please|pls|go ahead|do it|try|make|create|"
+    r"build|write|install|set up|setup|fix|check|look (?:at|over|into)|open|run|update|"
+    r"change|add|remove|delete|move|rename|show me|find|search|type|theme|start|finish)\b",
+    re.I)
+
+
+def _asked_for_work(user_input):
+    """Whether their message asked her to do something. Only then is a plan
+    without action worth holding her to; in ordinary chat, "let me think"
+    is just talk."""
+    if isinstance(user_input, list):
+        user_input = " ".join(p.get("text", "") for p in user_input if isinstance(p, dict))
+    return bool(user_input) and bool(_REQUEST.search(str(user_input)))
 
 
 def _promised(text):
@@ -523,7 +548,7 @@ def llm_stream(user_input=None, extra_system=None, use_tools=True, history=None)
             continue
 
         if not calls and offer is not None and not nudged and tools.wants_long_loop() \
-                and _promised("".join(said)):
+                and _asked_for_work(user_input) and _promised("".join(said)):
             # She said what she was about to do and stopped. Hold her to it
             # once, rather than leaving them with a plan and no work.
             nudged = True

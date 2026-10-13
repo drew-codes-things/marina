@@ -92,7 +92,9 @@ NOTE_EXPLAINED = (
     "not them: it is the real date and time right now, and which app they "
     "have in front. Trust it over anything else, so when they ask the time, "
     "tell them exactly. It says nothing about what is in that app, so never "
-    "guess at that. Never mention the tag or quote it."
+    "guess at that. Never mention the tag or quote it, and don't bring up "
+    "the day, date or time yourself unless they ask or it really matters to "
+    "what you're saying: people don't keep saying what day it is."
 )
 
 

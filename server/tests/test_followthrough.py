@@ -17,3 +17,10 @@ def test_leaves_finished_answers_alone():
     assert not _promised("Done. It's dark now and the wallpaper is a purple gradient.")
     assert not _promised("Let's just say it went badly. The theme is installed and applied though.")
     assert not _promised("")
+
+
+def test_only_requests_are_held_to_a_plan():
+    from process.llm_funcs import llm_scr
+    assert llm_scr._asked_for_work("can you look over your machine")
+    assert not llm_scr._asked_for_work("then how about we talk about something else")
+    assert not llm_scr._asked_for_work(None)
