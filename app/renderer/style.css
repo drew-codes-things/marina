@@ -66,6 +66,9 @@ body.reveal #chrome { opacity: 1; }
   -webkit-backdrop-filter: blur(12px);
 }
 .chip:hover { background: var(--panel-strong); }
+#btn-computer.on { background: var(--accent); color: #0b1017; }
+.page-drag #drag-strip { -webkit-app-region: no-drag; cursor: grab; }
+.page-drag #drag-strip:active { cursor: grabbing; }
 
 #stage {
   position: fixed;
@@ -340,8 +343,8 @@ html.stage, .stage body {
 /* Where she is working: her own machine, or this Mac. */
 body.working #status { opacity: 1; }
 #status[data-where="vm"] #status-text { color: #9ad7ff; }
-#status[data-where="mac"] #status-text { color: #ffcf7a; }
-#status[data-where="mac"] #dot { background: #ffb43a; }
+#status[data-where="mac"] #status-text, #status[data-where="computer"] #status-text { color: #ffcf7a; }
+#status[data-where="mac"] #dot, #status[data-where="computer"] #dot { background: #ffb43a; }
 
 /* Asking before she does something on this Mac. */
 #ask {

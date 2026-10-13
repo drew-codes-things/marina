@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --mac --dir",
-    "dmg": "electron-builder --mac"
+    "dmg": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux dir",
+    "appimage": "electron-builder --linux AppImage"
   },
   "license": "MIT",
   "dependencies": {},
@@ -91,7 +93,31 @@
           "path": "/Applications"
         }
       ]
-    }
+    },
+    "linux": {
+      "executableName": "marina",
+      "category": "Utility",
+      "icon": "build/icon.png",
+      "synopsis": "Transparent desktop VRM avatar assistant",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "dir",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "appImage": {
+      "artifactName": "Marina-${version}-${arch}.AppImage"
+    },
+    "afterPack": "build/afterPack.js"
   },
   "author": "Jacob Matthews"
 }

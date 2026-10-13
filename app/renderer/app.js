@@ -3,6 +3,8 @@ import { THREE, GLTFLoader, VRMLoaderPlugin, VRMUtils } from './vendor/vrm-bundl
 // In a browser the page comes from the bridge itself (see web-shim.js).
 const WEB = !!window.marina?.web;
 const BRIDGE = WEB ? '' : 'http://127.0.0.1:8765';
+const IS_LINUX = window.marina.platform === 'linux';
+const COMPUTER_NAME = IS_LINUX ? 'computer' : 'Mac';
 
 const el = (id) => document.getElementById(id);
 const canvas     = el('stage');
@@ -1342,7 +1344,8 @@ function tick() {
   }
 
   renderer.render(scene, camera);
-  updateClickThrough();
+  if (IS_LINUX) updateShape(dt);
+  else updateClickThrough();
 }
 
 const gl = renderer.getContext();
@@ -1396,6 +1399,120 @@ function updateClickThrough() {
   if (!cursor) return;
   const [x, y] = cursor;
   setSolid(overUI(x, y) || overAvatar(x, y));
+}
+
+window.marina.onSetDragMode?.((on) => document.documentElement.classList.toggle('page-drag', on));
+let pageDrag = null;
+el('drag-strip').addEventListener('pointerdown', (e) => {
+  if (!document.documentElement.classList.contains('page-drag') || e.button !== 0) return;
+  pageDrag = { x: e.screenX, y: e.screenY };
+  try { e.target.setPointerCapture(e.pointerId); } catch {}
+  e.preventDefault();
+});
+el('drag-strip').addEventListener('pointermove', (e) => {
+  if (!pageDrag) return;
+  window.marina.moveBy(e.screenX - pageDrag.x, e.screenY - pageDrag.y);
+  pageDrag = { x: e.screenX, y: e.screenY };
+});
+const endPageDrag = () => { pageDrag = null; };
+el('drag-strip').addEventListener('pointerup', endPageDrag);
+el('drag-strip').addEventListener('pointercancel', endPageDrag);
+
+const SHAPE_CELL = 8;
+const SHAPE_MARGIN = 4;
+const SHAPE_EVERY = 0.1;
+const silhouette = document.createElement('canvas');
+const silhouetteCtx = silhouette.getContext('2d');
+let shapeClock = 0;
+let sentShape = '';
+
+function uiRects() {
+  const rects = [];
+  for (const sel of UI) {
+    const box = document.querySelector(sel);
+    if (!box) continue;
+    const style = getComputedStyle(box);
+    if (style.display === 'none' || parseFloat(style.opacity) <= 0.05) continue;
+    const r = box.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) rects.push({ x: r.left, y: r.top, width: r.width, height: r.height });
+  }
+  return rects;
+}
+
+function grow(grid, w, h, by) {
+  let out = grid;
+  for (let pass = 0; pass < by; pass++) {
+    const next = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!out[y * w + x]) continue;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && ny >= 0 && nx < w && ny < h) next[ny * w + nx] = 1;
+          }
+        }
+      }
+    }
+    out = next;
+  }
+  return out;
+}
+
+function avatarRects() {
+  const w = Math.ceil(window.innerWidth / SHAPE_CELL);
+  const h = Math.ceil(window.innerHeight / SHAPE_CELL);
+  if (w < 1 || h < 1) return [];
+  if (silhouette.width !== w || silhouette.height !== h) {
+    silhouette.width = w;
+    silhouette.height = h;
+    silhouetteCtx.imageSmoothingQuality = 'high';
+  }
+  silhouetteCtx.clearRect(0, 0, w, h);
+  silhouetteCtx.drawImage(canvas, 0, 0, w, h);
+  const pixels = silhouetteCtx.getImageData(0, 0, w, h).data;
+  const solidCells = new Uint8Array(w * h);
+  for (let i = 0; i < solidCells.length; i++) solidCells[i] = pixels[i * 4 + 3] > 2 ? 1 : 0;
+  const grid = grow(solidCells, w, h, SHAPE_MARGIN);
+
+  const rects = [];
+  let growing = new Map();
+  for (let y = 0; y < h; y++) {
+    const next = new Map();
+    for (let x = 0; x < w;) {
+      if (!grid[y * w + x]) { x++; continue; }
+      const start = x;
+      while (x < w && grid[y * w + x]) x++;
+      const key = `${start}:${x}`;
+      let rect = growing.get(key);
+      if (rect) {
+        rect.height += SHAPE_CELL;
+      } else {
+        rect = { x: start * SHAPE_CELL, y: y * SHAPE_CELL, width: (x - start) * SHAPE_CELL, height: SHAPE_CELL };
+        rects.push(rect);
+      }
+      next.set(key, rect);
+    }
+    growing = next;
+  }
+  return rects;
+}
+
+function updateShape(dt) {
+  shapeClock -= dt;
+  if (shapeClock > 0) return;
+  shapeClock = SHAPE_EVERY;
+
+  const rects = document.documentElement.classList.contains('stage')
+    ? [{ x: 0, y: 0, width: window.innerWidth, height: window.innerHeight }]
+    : [...uiRects(), ...avatarRects()];
+  const whole = rects.map((r) => ({
+    x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height),
+  }));
+  const key = JSON.stringify(whole);
+  if (key === sentShape) return;
+  sentShape = key;
+  window.marina.setShape(whole);
 }
 
 tick();
@@ -1555,7 +1672,7 @@ async function playChunk(ev, req) {
 
 // What she is doing while she works, and on whose computer.
 function showActivity(ev) {
-  const where = ev.where === 'mac' ? 'your Mac' : 'her machine';
+  const where = ev.where === 'mac' || ev.where === 'computer' ? `your ${COMPUTER_NAME}` : 'her machine';
   document.body.classList.add('working');
   el('status').dataset.where = ev.where || '';
   setStatus('busy', `${where} \u00b7 ${ev.text}`);
@@ -1572,7 +1689,8 @@ let askId = null;
 function askConfirm(ev) {
   showActivity({ where: ev.where, text: 'waiting for you' });
   askId = ev.id;
-  el('ask-where').textContent = ev.where === 'mac' ? 'On your Mac' : 'On her machine';
+  el('ask-where').textContent = ev.where === 'mac' || ev.where === 'computer'
+    ? `On your ${COMPUTER_NAME}` : 'On her machine';
   el('ask-text').textContent = ev.text;
   el('ask').classList.remove('hidden');
   el('ask-allow').focus();
@@ -2057,7 +2175,7 @@ window.marina.onSetOpeners?.((on) => {
 let brainMode = 'auto';
 let personality = { preset: 'default', presets: [] };
 // Filled in from the bridge; these are only what to show before it answers.
-let brainLabels = { server: 'Server', local: 'This Mac' };
+let brainLabels = { server: 'Server', local: `This ${COMPUTER_NAME}` };
 let brainOrder = ['server', 'local'];
 
 function brainLabel(name) { return brainLabels[name] || name || '?'; }
@@ -2119,22 +2237,20 @@ async function openPicker() {
     }
   }
 
-  const mac = await fetch(`${BRIDGE}/mac`).then((r) => r.json()).catch(() => null);
+  const mac = await fetch(`${BRIDGE}/computer`).then((r) => r.json()).catch(() => null);
   if (mac?.available) {
-    pickGroup(list, 'This Mac');
+    pickGroup(list, `This ${COMPUTER_NAME}`);
     const missing = mac.enabled && !(mac.screen && mac.control);
     list.appendChild(pickItem(
-      missing ? 'Let her use it (needs permissions)' : 'Let her use it',
+      missing ? `Let her use it (needs ${IS_LINUX ? 'setup' : 'permissions'})` : 'Let her use it',
       mac.enabled
         ? 'She can see your screen and use your apps, asking you first. Click to turn off.'
         : 'Let her see your screen and use your apps, asking you first',
       mac.enabled,
       async () => {
-        const res = await post('/mac', { enabled: !mac.enabled }).catch(() => null);
-        if (res?.enabled && !(res.screen && res.control)) {
-          showNotice('Allow Marina under System Settings → Privacy & Security → '
-            + 'Screen Recording and Accessibility, then reopen her.');
-        }
+        const res = await post('/computer', { enabled: !mac.enabled }).catch(() => null);
+        setupNotice(res);
+        paintComputer(res);
         openPicker();
       },
     ));
@@ -2217,6 +2333,44 @@ async function refreshBrain() {
   } catch {}
 }
 
+function setupNotice(res) {
+  if (!res?.enabled || (res.screen && res.control)) return;
+  showNotice(IS_LINUX && res.missing?.length
+    ? res.missing.join('\n')
+    : 'Allow Marina under System Settings → Privacy & Security → '
+      + 'Screen Recording and Accessibility, then reopen her.');
+}
+
+function paintComputer(info) {
+  const b = el('btn-computer');
+  if (!b || !info) return;
+  const needsSetup = info.enabled && !(info.screen && info.control);
+  b.classList.toggle('on', !!info.enabled);
+  b.setAttribute('aria-pressed', String(!!info.enabled));
+  b.title = !info.enabled
+    ? `Let her use this ${COMPUTER_NAME} (off)`
+    : `She can use this ${COMPUTER_NAME}, asking you first${needsSetup ? ` (needs ${IS_LINUX ? 'setup' : 'permissions'})` : ''}. Click to turn off.`;
+}
+
+async function refreshComputer() {
+  try {
+    const info = await (await fetch(`${BRIDGE}/computer`)).json();
+    el('btn-computer').hidden = !(IS_LINUX && info.available);
+    paintComputer(info);
+  } catch {}
+}
+
+async function toggleComputer() {
+  try {
+    const current = await (await fetch(`${BRIDGE}/computer`)).json();
+    const res = await post('/computer', { enabled: !current.enabled });
+    paintComputer(res);
+    setupNotice(res);
+  } catch (e) {
+    showNotice(`Could not change computer control: ${e.message}`);
+  }
+}
+
 function togglePicker() {
   el('picker').classList.contains('hidden') ? openPicker() : closePicker();
 }
@@ -2224,6 +2378,7 @@ el('status').addEventListener('click', togglePicker);
 el('status').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); togglePicker(); }
 });
+el('btn-computer').addEventListener('click', toggleComputer);
 el('btn-brain').addEventListener('click', () => {
   togglePicker();
 });
@@ -2311,6 +2466,7 @@ async function pollForBridge({ quietFor = 16000 } = {}) {
         hideNotice('bridge');
 
         post('/warmup').catch(() => {});
+        refreshComputer();
         bargeEnabled = info.barge_in !== false;
         if (info.idle) idleMuted = !!info.idle.muted || info.idle.enabled === false;
         startOpenerPoll();
@@ -2340,3 +2496,9 @@ el('btn-see').hidden = true;
 
 pollForBridge();
 loadFromDisk();
+
+if (IS_LINUX) {
+  document.querySelectorAll('[title]').forEach((box) => {
+    box.title = box.title.replace('\u2318\u21e7', 'Ctrl+Shift+');
+  });
+}

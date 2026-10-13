@@ -3,6 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const IS_LINUX = process.platform === 'linux';
+const linux = IS_LINUX ? require('./linux') : null;
+if (IS_LINUX) linux.relaunchAsX11IfNeeded();
+
 const BUNDLED_MODELS_DIR = path.join(__dirname, 'models');
 
 function userModelsDir() {
@@ -79,8 +83,8 @@ async function startBridge() {
       'Marina cannot find her backend',
       `Expected:\n  ${python}\n  ${script}\n\n` +
       (app.isPackaged
-        ? 'This copy of Marina.app looks incomplete. Download it again.'
-        : 'Run ./setup-mac.sh in the project folder.'),
+        ? `This copy of Marina${IS_LINUX ? '' : '.app'} looks incomplete. ${IS_LINUX ? 'Build it again.' : 'Download it again.'}`
+        : `Run ./${IS_LINUX ? 'setup-linux.sh' : 'setup-mac.sh'} in the project folder.`),
     );
     return;
   }
@@ -194,10 +198,12 @@ function writeState() {
 
 let ignoring = true;
 ipcMain.on('click-through', (_e, ignore) => {
-  if (!win || win.isDestroyed() || stage || ignore === ignoring) return;
+  if (IS_LINUX || !win || win.isDestroyed() || stage || ignore === ignoring) return;
   ignoring = ignore;
   win.setIgnoreMouseEvents(ignore, { forward: true });
 });
+
+if (IS_LINUX) linux.registerIpc(() => win, () => stage);
 
 // Stage view: full screen on a solid backdrop, for turning the laptop round
 // to show her to people. The renderer paints the backdrop.
@@ -206,6 +212,7 @@ let stage = false;
 function setStage(on) {
   if (!win) return;
   stage = !!on;
+  if (IS_LINUX) return linux.setStage(stage);
   win.setSimpleFullScreen(stage);
   win.setIgnoreMouseEvents(!stage, { forward: true });
   ignoring = !stage;
@@ -240,15 +247,21 @@ function createWindow() {
       nodeIntegration: false,
       backgroundThrottling: false,
     },
+    ...(IS_LINUX ? linux.windowOptions(saved) : {}),
   });
 
-  win.setIgnoreMouseEvents(true, { forward: true });
+  if (!IS_LINUX) win.setIgnoreMouseEvents(true, { forward: true });
 
   win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   win.webContents.setBackgroundThrottling(false);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  if (IS_LINUX) {
+    const { x, y } = linux.windowOptions(saved);
+    linux.attach(win, { stage: () => stage, save: writeState, position: { x, y } });
+  }
 
   ignoring = true;
 
@@ -269,19 +282,18 @@ let wakeOn = false;
 // menu is about to show, since the bridge owns the current choice.
 let presetState = { preset: null, presets: [] };
 
-// Whether she may use this Mac, and what macOS lets her do.
-let macState = { available: false, enabled: false, screen: false, control: false };
+let macState = { available: false, enabled: false, screen: false, control: false, name: 'Mac' };
 
 async function fetchMac() {
   try {
-    const res = await fetch(`${BRIDGE_URL}/mac`, { signal: AbortSignal.timeout(1500) });
+    const res = await fetch(`${BRIDGE_URL}/computer`, { signal: AbortSignal.timeout(1500) });
     if (res.ok) macState = await res.json();
   } catch {}
 }
 
 async function setMac(enabled) {
   try {
-    const res = await fetch(`${BRIDGE_URL}/mac`, {
+    const res = await fetch(`${BRIDGE_URL}/computer`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }), signal: AbortSignal.timeout(5000),
     });
@@ -297,8 +309,10 @@ async function fetchPresets() {
 }
 
 function buildTray() {
-  const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'trayTemplate.png'));
-  icon.setTemplateImage(true);
+  const icon = IS_LINUX
+    ? nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png')).resize({ width: 32, height: 32 })
+    : nativeImage.createFromPath(path.join(__dirname, 'assets', 'trayTemplate.png'));
+  if (!IS_LINUX) icon.setTemplateImage(true);
   tray = new Tray(icon);
   tray.setToolTip('Marina');
 
@@ -321,10 +335,16 @@ function buildTray() {
           win?.webContents.send('set-openers', openersOn);
         },
       },
+      ...(IS_LINUX && linux.canLayerOverFullScreen() ? [{
+        label: 'Show over full-screen apps',
+        type: 'checkbox',
+        checked: linux.overFullScreen(),
+        click: (item) => { linux.setOverFullScreen(item.checked); linux.applyLayer(); },
+      }] : []),
       ...(macState.available ? [{
         label: macState.enabled && !(macState.screen && macState.control)
-          ? 'Let her use this Mac (needs permissions)'
-          : 'Let her use this Mac',
+          ? `Let her use this ${macState.name} (needs ${IS_LINUX ? 'setup' : 'permissions'})`
+          : `Let her use this ${macState.name}`,
         type: 'checkbox',
         checked: macState.enabled,
         click: (item) => { setMac(item.checked).then(refresh); },
@@ -353,17 +373,20 @@ function buildTray() {
         label: 'Stage view (full screen)',
         type: 'checkbox',
         checked: stage,
-        accelerator: 'Command+Shift+F',
+        accelerator: 'CommandOrControl+Shift+F',
         click: (item) => setStage(item.checked),
       },
       { type: 'separator' },
       { label: 'Change model…', click: () => { win?.show(); win?.webContents.send('pick-model'); } },
-      { label: 'Reset position', click: () => { if (win) { win.setBounds({ x: 60, y: 60, width: 420, height: 680 }); win.show(); } } },
+      { label: 'Reset position', click: () => {
+        if (IS_LINUX) return linux.resetPosition();
+        if (win) { win.setBounds({ x: 60, y: 60, width: 420, height: 680 }); win.show(); }
+      } },
       { label: 'Reload', click: () => win?.reload() },
       { label: 'Edit config…', click: () => shell.openPath(configFile()) },
       { label: 'Open bridge log', click: () => shell.openPath(path.join(app.getPath('userData'), 'bridge.log')) },
       { type: 'separator' },
-      { label: 'Quit Marina', accelerator: 'Command+Shift+Q', click: () => app.quit() },
+      { label: 'Quit Marina', accelerator: 'CommandOrControl+Shift+Q', click: () => app.quit() },
     ]));
   };
 
@@ -379,6 +402,9 @@ function buildTray() {
     if (macState.available) { clearInterval(poll); fetchPresets().then(refresh); }
   }, 2000);
   setTimeout(() => clearInterval(poll), 120000);
+  if (IS_LINUX) {
+    setInterval(() => Promise.all([fetchPresets(), fetchMac()]).then(refresh), 5000);
+  }
   return refresh;
 }
 
@@ -448,6 +474,15 @@ ipcMain.handle('pick-vrm', async () => {
   }
 });
 
+async function bridgeScreenshot() {
+  try {
+    const res = await fetch(`${BRIDGE_URL}/screenshot`, { signal: AbortSignal.timeout(20000) });
+    return await res.json();
+  } catch (e) {
+    return { error: `Screen capture failed: ${e.message}` };
+  }
+}
+
 ipcMain.handle('capture-screen', async () => {
   if (process.platform === 'darwin') {
     const status = systemPreferences.getMediaAccessStatus('screen');
@@ -465,6 +500,15 @@ ipcMain.handle('capture-screen', async () => {
 
   try {
     await new Promise((r) => setTimeout(r, 220));
+
+    if (IS_LINUX) {
+      let shot = await bridgeScreenshot();
+      if (!shot.image) {
+        await new Promise((r) => setTimeout(r, 1000));
+        shot = await bridgeScreenshot();
+      }
+      if (shot.image || process.env.XDG_SESSION_TYPE === 'wayland') return shot;
+    }
 
     const { width, height } = screen.getPrimaryDisplay().size;
     const scale = Math.min(1, 1400 / width);
