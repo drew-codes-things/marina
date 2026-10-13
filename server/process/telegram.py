@@ -37,7 +37,10 @@ TEXTS_PER_DAY = int(_cfg.get("unprompted_per_day", 3))
 GAP_HOURS = float(_cfg.get("unprompted_gap_hours", 3))
 
 API = f"https://api.telegram.org/bot{TOKEN}"
+FILE_API = f"https://api.telegram.org/file/bot{TOKEN}"
 LIMIT = 4000
+MAX_RETRY_AFTER = 30
+POLL_ERROR_PAUSE = 10
 
 TEXTING = """
 
@@ -86,7 +89,7 @@ def enabled():
     return bool(_cfg.get("enabled")) and bool(TOKEN)
 
 
-def _call(method, timeout=30, **params):
+def _call(method, timeout=30, retried=False, **params):
     files = params.pop("files", None)
     body = None
     for attempt in range(2):
@@ -108,9 +111,28 @@ def _call(method, timeout=30, **params):
             print(f"[telegram] {method} failed: {type(e).__name__}", flush=True)
             return None
     if not body.get("ok"):
+        wait = _retry_after(body)
+        if wait is not None and not retried:
+            print(f"[telegram] {method}: asked too often, waiting {wait}s", flush=True)
+            time.sleep(wait)
+            if files:
+                for f in files.values():
+                    f[1].seek(0)
+                params["files"] = files
+            return _call(method, timeout, True, **params)
         print(f"[telegram] {method}: {body.get('description')}", flush=True)
         return None
     return body.get("result")
+
+
+def _retry_after(body):
+    """Seconds Telegram asks us to wait before repeating a request it refused
+    for coming too fast, or None if that isn't why it refused (or the wait is
+    too long to sit through)."""
+    if body.get("error_code") != 429:
+        return None
+    wait = (body.get("parameters") or {}).get("retry_after")
+    return wait if isinstance(wait, int) and 0 <= wait <= MAX_RETRY_AFTER else None
 
 
 class _Typing:
@@ -185,7 +207,7 @@ def _send_text(chat, reply):
             with _Typing(chat):
                 time.sleep(pause * random.uniform(0.7, 1.1))
         sent = _call("sendMessage", chat_id=chat, text=_to_html(bubble),
-                     parse_mode="HTML", disable_web_page_preview="true")
+                     parse_mode="HTML", link_preview_options='{"is_disabled": true}')
         if sent is None:
             _call("sendMessage", chat_id=chat, text=bubble)
 
@@ -447,8 +469,7 @@ def _transcribe_voice(message, transcribe):
     if not info or not transcribe:
         return ""
     try:
-        r = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}",
-                         timeout=(5, 60))
+        r = requests.get(f"{FILE_API}/{info['file_path']}", timeout=(5, 60))
         r.raise_for_status()
     except requests.RequestException as e:
         print(f"[telegram] could not fetch voice note: {type(e).__name__}", flush=True)
@@ -521,7 +542,7 @@ def _poll(transcribe, synthesize):
         try:
             r = _poll_session.post(f"{API}/getUpdates", data=params,
                                    timeout=(5, POLL_SECONDS + 10))
-            updates = r.json().get("result") or []
+            body = r.json()
         except (requests.RequestException, ValueError) as e:
             # A dropped long poll is routine on home networks; start a clean
             # connection and carry on.
@@ -530,7 +551,11 @@ def _poll(transcribe, synthesize):
             _poll_session.close()
             time.sleep(2)
             continue
-        for update in updates:
+        if not body.get("ok"):
+            print(f"[telegram] getUpdates: {body.get('description')}", flush=True)
+            time.sleep(_retry_after(body) or POLL_ERROR_PAUSE)
+            continue
+        for update in body.get("result") or []:
             offset = update["update_id"] + 1
             message = update.get("message")
             if not message:
