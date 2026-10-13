@@ -139,3 +139,8 @@ def test_a_draft_with_problems_is_written_again(monkeypatch):
         if role == "assistant" else ["talk about something else"]))
     assert telegram._compose("anyway", "") == "fair, what else is new with you"
     assert "tuesday" in notes[1] and "kubernetes" in notes[1]
+
+
+def test_a_text_resent_from_long_ago_is_caught():
+    old = "hey! just checking in because it feels like we got distracted earlier. how's the coffee"
+    assert telegram._repeats(old, recent=["something else entirely here ok"], older=[old])

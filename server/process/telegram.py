@@ -214,6 +214,9 @@ def _send_voice(chat, reply, synthesize):
 # How far back she checks herself for repeats, how alike two texts have to
 # be to count as the same one, and how many words in a row make a phrase.
 RECENT_REPLIES = 8
+# A whole text sent again is checked much further back than a phrase: she
+# resent a day-old "just checking in" text word for word.
+SAME_TEXT_REPLIES = 60
 SAME_TEXT = 0.75
 PHRASE_WORDS = 5
 
@@ -328,14 +331,19 @@ def _stuck_topics(reply, recent, their_recent):
     return out
 
 
-def _repeats(reply, recent):
+def _repeats(reply, recent, older=()):
     """What in this reply she has already been saying: a whole text she
-    sent before, or a phrase from one, or a phrase she loops within it."""
+    sent before (looked for in `older` too), or a phrase from one of the
+    `recent` ones, or a phrase she loops within it."""
     words = _words(reply)
     if len(words) < PHRASE_WORDS:
         return []  # "lol" twice is just texting
     text = " ".join(words)
     found = []
+    for earlier in map(_words, older):
+        if difflib.SequenceMatcher(None, text, " ".join(earlier),
+                                   autojunk=False).ratio() >= SAME_TEXT:
+            found.append(" ".join(earlier[:12]))
     for earlier in map(_words, recent):
         if difflib.SequenceMatcher(None, text, " ".join(earlier),
                                    autojunk=False).ratio() >= SAME_TEXT:
@@ -366,10 +374,10 @@ AGAIN_TOPIC = """
 what they actually said.)"""
 
 
-def _problems(reply, user_text, recent, their_recent):
+def _problems(reply, user_text, recent, their_recent, older=()):
     """What's wrong with a draft text: phrases she keeps reusing, the day
     or time unprompted, and a topic she won't drop."""
-    return {"worn": _repeats(reply, recent),
+    return {"worn": _repeats(reply, recent, older),
             "when": _mentions_when(reply, user_text),
             "topics": _stuck_topics(reply, recent, their_recent)}
 
@@ -385,9 +393,10 @@ def _compose(user_text, extra):
     won't let go. Asking again with the problem named gets her out of it
     without changing how she talks."""
     recent = _recent_replies()
+    older = _recent("assistant", SAME_TEXT_REPLIES)[:-RECENT_REPLIES]
     their_recent = _recent("user", 2) + ([user_text] if user_text else [])
     reply, used_tools = _generate(user_text, extra)
-    found = _problems(reply, user_text, recent, their_recent)
+    found = _problems(reply, user_text, recent, their_recent, older)
     # Asking again would run her tools twice, so a reply that did things stands.
     if not _count(found) or used_tools:
         return reply
@@ -405,7 +414,7 @@ def _compose(user_text, extra):
               flush=True)
         notes.append(AGAIN_TOPIC.format(topics=", ".join(f'"{t}"' for t in found["topics"])))
     retry, _ = _generate(user_text, extra, "".join(notes))
-    if not retry or _count(_problems(retry, user_text, recent, their_recent)) >= _count(found):
+    if not retry or _count(_problems(retry, user_text, recent, their_recent, older)) >= _count(found):
         return reply
     return retry
 
