@@ -25,6 +25,8 @@ CASES = [
 
     ("**bold** and `code` and \U0001F642 done.", ["done"], ["`", "*"], None),
     ("*unclosed action here", [], ["unclosed"], None),
+
+    ("\\*sighs\\* fine, whatever.", ["fine"], ["sighs", "\\"], "sigh"),
 ]
 
 

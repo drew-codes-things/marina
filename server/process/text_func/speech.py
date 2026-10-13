@@ -110,7 +110,7 @@ def split_reply(text):
     if not display:
         return {"display": "", "speech": "", "cues": []}
 
-    body = _FENCE.sub(" ", display)
+    body = _FENCE.sub(" ", display).replace("\\*", "*")
     body = _INLINE_CODE.sub(r"\1", body)
     body = _LINK.sub(r"\1", body)
     body = _BULLET.sub("", body)
