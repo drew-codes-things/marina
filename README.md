@@ -27,7 +27,8 @@ local and uses about 674 MB of RAM.
 | --- | --- |
 | macOS 13 Ventura or newer, Apple Silicon | Supported. Download the `.dmg` below. |
 | macOS, Intel | Not built. The code has nothing Apple-Silicon-specific in it, so [building from source](#building-from-source) should work, but I have no Intel Mac to check it on. |
-| Windows, Linux | Not supported. The Python backend is portable but the window is written against macOS. |
+| Linux, x86_64, X11 or Wayland | Supported, tested on Debian 13 with KDE Plasma 6. See [Linux](#linux). |
+| Windows | Not supported. The Python backend is portable but the window is written against macOS and Linux. |
 
 ## Install
 
@@ -77,6 +78,89 @@ llama.cpp, LM Studio, vLLM, a box on your network, or OpenAI itself. Leave
 
 Her config, memory and chat history live in
 `~/Library/Application Support/Marina/`.
+
+## Linux
+
+Marina also runs on Linux, on X11 and Wayland (x86_64). It was tested on Debian 13
+with KDE Plasma 6.3 on Wayland; other desktops should work but haven't been tried. There is
+no prebuilt download: build one file you can keep, or run her from a checkout.
+
+### Install
+
+```bash
+./setup-linux.sh          # once
+./build-app-linux.sh      # makes app/dist/Marina-1.0.0-x86_64.AppImage
+chmod +x app/dist/Marina-1.0.0-x86_64.AppImage
+./app/dist/Marina-1.0.0-x86_64.AppImage
+```
+
+The AppImage carries its own Python, the voice model and the speech recognition model,
+so it runs on a machine that has never seen this repo. It is around 1 GB for the same
+reason. Two things come from your distribution. On **Debian 13**:
+
+```bash
+sudo apt install libportaudio2     # the microphone
+sudo apt install libfuse2t64       # to run any AppImage; or run it with --appimage-extract-and-run
+```
+
+Package names differ between releases: `libfuse2` on Debian 12 and Ubuntu 22.04 and
+earlier, `portaudio` on Fedora and Arch. To build from a checkout you also need
+`python3-venv`, `npm` and `rsync`.
+
+Her helpers, on Debian 13 (all optional; each switches a feature on):
+
+| Feature | Package |
+| --- | --- |
+| Read the clipboard | `wl-clipboard` (Wayland) or `xclip` / `xsel` (X11) |
+| Open links | `xdg-utils` (usually already there) |
+| Look at the screen | `kde-spectacle` (KDE), `gnome-screenshot` (GNOME), `grim` (Sway, Hyprland) or `scrot` (X11) |
+| Mouse and keyboard, Wayland | Nothing: the desktop's RemoteDesktop portal, which asks you once |
+| Mouse and keyboard, X11 | `xdotool` |
+| Stay above full-screen apps, KDE | `x11-utils` (for `xprop`) |
+| Tell which window is in front, KDE Wayland | `kdotool`, not in Debian's repositories |
+
+From a checkout, run `./start-bridge.sh` in one terminal and `./start-app.sh` in another.
+Run only one copy at a time: the app and `./start-app.sh` both use port 8765.
+
+### Her window
+
+She runs as an X11 client, through XWayland on a Wayland desktop. Electron picks its
+backend before her own code runs, so the AppImage is started through a small launcher
+that passes `--ozone-platform=x11`, and `./start-app.sh` restarts itself once with it.
+Set `MARINA_WAYLAND=1` to run natively instead (she then loses always-on-top and her position).
+
+This is deliberate. A native Wayland window was tried on KDE Plasma 6.3 with Electron 44:
+`setShape` and `setIgnoreMouseEvents` do nothing, so her whole rectangle would swallow
+clicks, and a keep-above window stays under an active full-screen app. Revisit it if
+Electron gains input-region or layer-shell support.
+
+On KDE she goes above full-screen apps too, by marking her window as a critical
+notification with `xprop`. KDE then won't move it itself, so the page drags her. Switch it
+from "Show over full-screen apps" in the tray menu. The global shortcuts only fire while
+an XWayland window has focus; the tray menu and the buttons in her window always work.
+GNOME shows no tray icon without the AppIndicator extension.
+
+### Letting her use the computer
+
+Off by default. Turn it on with the monitor button in her toolbar, "Let her use this
+computer" in the tray menu, or the model picker. She asks first before using the mouse
+and keyboard and before anything risky, and passwords and keys are off limits. On Wayland the
+mouse and keyboard go through the portal, which shows a prompt the first time; the answer
+is kept in `~/.config/Marina/portal_token`. X11 uses `xdotool`, with `ydotool` as a fallback.
+
+### Known limits
+
+- Through the portal, KDE only types characters your keyboard layout has. Accented letters,
+  €, other alphabets and emoji are dropped, and she says so when the text had any.
+- Wayland won't say which window is in front, so without `kdotool` she can't check she isn't
+  typing into a password manager. X11 and KDE with `kdotool` can.
+- Small models (1.5B) often describe a task instead of doing it, and their earlier
+  non-answers in the chat history make that worse. Clear the conversation with the
+  "Forget conversation" button if she gets stuck. A 3B model is better and slower.
+- Telegram is tested against a local stand-in for the Bot API and with one live request
+  using a made-up token; it hasn't been run with a real bot.
+- Linux has no microphone permission prompt. She records through PortAudio from the
+  default input; set `asr.input_device` in the config to use another.
 
 ## What she can do
 
@@ -307,6 +391,9 @@ server/
                               and into speakable chunks while streaming
     idle.py                   when she says something unprompted
     tools/context.py          time, frontmost app, battery
+    tools/computer.py         Linux: screen, mouse, keyboard, commands and files on your computer
+    tools/portal.py           Linux: mouse and keyboard on Wayland, through the desktop's RemoteDesktop portal
+    tools/session.py          Linux: X11 or Wayland, and the small tools that ask the desktop things
     tools/registry.py         timers, clipboard, links, remembering
     tools/workspace.py        commands and files on her own machine, over SSH
     telegram.py               texting her, voice notes, texting first
@@ -318,6 +405,7 @@ server/
 models/kokoro/                local voice model (about 340 MB)
 app/
   main.js                     Electron, the transparent always on top window
+  linux.js                    Linux only: the X11 overlay, its layer, placement and click-through shape
   preload.js                  IPC bridge
   renderer/app.js             three.js and three-vrm, lip sync, chat UI
   models/model.vrm            your avatar
