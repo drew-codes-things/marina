@@ -2,7 +2,7 @@
 import io
 import threading
 
-from process.config import load_config, resolve
+from process.config import SETUP_SCRIPT, load_config, resolve
 
 _config = load_config()
 _tts = _config.get("tts") or {}
@@ -32,7 +32,7 @@ def _load_kokoro():
             from kokoro_onnx import Kokoro
         except ImportError as e:
             raise TTSError(
-                "kokoro-onnx isn't installed. Run ./setup-mac.sh, or switch "
+                f"kokoro-onnx isn't installed. Run ./{SETUP_SCRIPT}, or switch "
                 "tts.provider to 'sovits'."
             ) from e
 

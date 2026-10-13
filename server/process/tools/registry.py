@@ -1,8 +1,9 @@
 """Tools the model can call: timers, clipboard, opening links, remembering,
 and her workspace machine (see process.tools.workspace).
 
-open_url only accepts http and https. The clipboard and open_url need a Mac,
-so a headless bridge on Linux leaves them out.
+open_url only accepts http and https. The clipboard and open_url need a desktop
+session (a Mac, or Linux with wl-clipboard, xclip or xsel and xdg-open), so a
+headless bridge leaves them out.
 """
 import json
 import re
@@ -14,7 +15,9 @@ from urllib.parse import urlparse
 
 from process.config import load_config, setting
 from process.memory import store as memory
+from process.tools import computer
 from process.tools import mac
+from process.tools import session
 from process.tools import workspace
 
 _config = load_config()
@@ -30,8 +33,28 @@ def _allowed(key):
 _ON_MAC = sys.platform == "darwin"
 
 
-def _mac_only(key):
-    return lambda: _ON_MAC and _allowed(key)
+def _linux_clipboard_command():
+    """The command that prints the clipboard on this desktop, or None."""
+    readers = [(["wl-paste", "--no-newline"], "wl-paste"),
+               (["xclip", "-selection", "clipboard", "-o"], "xclip"),
+               (["xsel", "--clipboard", "--output"], "xsel")]
+    if not session.kind():
+        return None
+    if session.kind() == "x11":
+        readers.append(readers.pop(0))
+    return next((command for command, tool in readers if session.have(tool)), None)
+
+
+def _clipboard_available():
+    if _ON_MAC:
+        return _allowed("clipboard")
+    return _allowed("clipboard") and _linux_clipboard_command() is not None
+
+
+def _open_url_available():
+    if _ON_MAC:
+        return _allowed("open_url")
+    return _allowed("open_url") and bool(session.kind()) and session.have("xdg-open")
 
 
 def _workspace_allowed():
@@ -83,8 +106,11 @@ def set_timer(minutes, label=""):
 def read_clipboard():
     if not _allowed("clipboard"):
         return "The clipboard is off limits."
+    command = ["pbpaste"] if _ON_MAC else _linux_clipboard_command()
+    if command is None:
+        return "No clipboard tool is installed (wl-clipboard on Wayland, xclip or xsel on X11)."
     try:
-        out = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=2)
+        out = subprocess.run(command, capture_output=True, text=True, timeout=2)
     except Exception as e:
         return f"Could not read the clipboard: {e}"
     text = (out.stdout or "").strip()
@@ -103,10 +129,13 @@ def open_url(url):
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return "Only http and https links can be opened."
-    try:
-        subprocess.run(["open", url], timeout=3, check=False)
-    except Exception as e:
-        return f"Could not open it: {e}"
+    if _ON_MAC:
+        try:
+            subprocess.run(["open", url], timeout=3, check=False)
+        except Exception as e:
+            return f"Could not open it: {e}"
+    elif not session.spawn(["xdg-open", url]):
+        return "Could not open it: xdg-open failed."
     print(f"[tool] opened {url}", flush=True)
     return f"Opened {parsed.netloc}."
 
@@ -132,7 +161,7 @@ SPECS = [
             },
             "required": ["minutes"],
         }}),
-    ("read_clipboard", read_clipboard, _mac_only("clipboard"), {
+    ("read_clipboard", read_clipboard, _clipboard_available, {
         "description": "Read what is on the clipboard. You cannot see it any "
                        "other way, so call this whenever they mention "
                        "something they copied or pasted, or refer to 'this' "
@@ -140,8 +169,10 @@ SPECS = [
                        "they copied.",
         "parameters": {"type": "object", "properties": {}},
         }),
-    ("open_url", open_url, _mac_only("open_url"), {
-        "description": "Open a web link in their browser. Only http and https.",
+    ("open_url", open_url, _open_url_available, {
+        "description": "Open a web link in their browser. Only http and https."
+                       + ("" if _ON_MAC else " If they name a browser, use computer_open with that "
+                          "app and the url instead."),
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
@@ -163,12 +194,16 @@ SPECS = [
 SPECS += [(name, fn, _workspace_allowed, spec) for name, fn, spec in workspace.SPECS]
 
 
-def _mac_allowed():
-    return mac.available() and _allowed("mac")
+_DESKTOP = mac if _ON_MAC else computer
+_DESKTOP_KEY = "mac" if _ON_MAC else "computer"
 
 
-SPECS += [(name, fn, _mac_allowed, spec) for name, fn, spec in mac.SPECS]
-_MAC_TOOLS = {name for name, *_ in mac.SPECS}
+def _desktop_allowed():
+    return _DESKTOP.available() and _allowed(_DESKTOP_KEY)
+
+
+SPECS += [(name, fn, _desktop_allowed, spec) for name, fn, spec in _DESKTOP.SPECS]
+_DESKTOP_TOOLS = {name for name, *_ in _DESKTOP.SPECS}
 
 _HANDLERS = {name: (fn, on) for name, fn, on, _ in SPECS}
 
@@ -186,24 +221,24 @@ _WORKSPACE_TOOLS = {name for name, *_ in workspace.SPECS}
 
 def describe(name, arguments):
     """(label, where) for a tool call the app should show, else (None, None).
-    where is "vm" for her machine, "mac" for theirs."""
+    where is "vm" for her machine, "mac" or "computer" for theirs."""
     args = _args(arguments)
     if name in _WORKSPACE_TOOLS:
         return workspace.describe(name, args), "vm"
-    if name in _MAC_TOOLS:
-        return mac.describe(name, args), "mac"
+    if name in _DESKTOP_TOOLS:
+        return _DESKTOP.describe(name, args), _DESKTOP_KEY
     return None, None
 
 
 def needs_ok(name, arguments, consented):
     """A question to put to them before running this call, or None."""
-    if name in _MAC_TOOLS:
-        return mac.needs_ok(name, _args(arguments), consented)
+    if name in _DESKTOP_TOOLS:
+        return _DESKTOP.needs_ok(name, _args(arguments), consented)
     return None
 
 
 def consent_key(name):
-    return mac.consent_key(name) if name in _MAC_TOOLS else name
+    return _DESKTOP.consent_key(name) if name in _DESKTOP_TOOLS else name
 
 
 def prompt_addition():
@@ -211,7 +246,7 @@ def prompt_addition():
     if not _allowed("enabled"):
         return ""
     machines = ((workspace.PROMPT if _workspace_allowed() else "")
-                + (mac.PROMPT if _mac_allowed() else ""))
+                + (_DESKTOP.PROMPT if _desktop_allowed() else ""))
     return machines + (WORKING if machines else "")
 
 
@@ -225,7 +260,7 @@ them about how it went, which should sound like you."""
 
 def wants_long_loop():
     """Work on a machine takes many calls in a row; the rest take one."""
-    return _allowed("enabled") and (_workspace_allowed() or _mac_allowed())
+    return _allowed("enabled") and (_workspace_allowed() or _desktop_allowed())
 
 
 def definitions():

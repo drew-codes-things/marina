@@ -11,7 +11,7 @@ Backends are tried in this order in auto mode:
 """
 import threading
 
-from process.config import load_config
+from process.config import HOST_NAME, load_config
 
 _config = load_config()
 _llm = _config.get("llm") or {}
@@ -49,7 +49,7 @@ def _build():
     if local:
         out.append({
             "name": "local",
-            "label": _llm.get("fallback_label") or "This Mac",
+            "label": _llm.get("fallback_label") or f"This {HOST_NAME}",
             "base_url": local,
             "api_key": _llm.get("fallback_api_key") or "not-needed",
             "model": _llm.get("fallback_model") or out[0]["model"],

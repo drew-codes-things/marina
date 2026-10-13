@@ -20,7 +20,7 @@ import uuid
 from fastapi import Body
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from process.config import load_config
+from process.config import HOST_NAME, load_config
 from process.llm_funcs import llm_scr
 from process.memory import extract as memory_extract
 
@@ -48,7 +48,7 @@ _STEP_LINES = re.compile(r"^> \u2699\ufe0f .*\n*", re.M)
 
 
 def _step(activity):
-    where = "on her machine" if activity.where == "vm" else "on your Mac"
+    where = "on her machine" if activity.where == "vm" else f"on your {HOST_NAME}"
     return f"{_STEP}*{where}:* {activity.label}\n\n"
 
 

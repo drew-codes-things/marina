@@ -1,8 +1,11 @@
 """Time, frontmost app name and battery, for the prompt."""
 import subprocess
+import sys
 from datetime import datetime
+from pathlib import Path
 
 from process.config import load_config
+from process.tools import session
 
 _config = load_config()
 _ctx = _config.get("context") or {}
@@ -13,6 +16,7 @@ SHOW_APP = bool(_ctx.get("frontmost_app", True))
 SHOW_BATTERY = bool(_ctx.get("battery", True))
 
 TIMEOUT = 0.6
+POWER_SUPPLY = Path("/sys/class/power_supply")
 
 
 def _run(args):
@@ -37,6 +41,9 @@ def time_of_day(now=None):
 
 
 def frontmost_app():
+    if sys.platform != "darwin":
+        front = session.front_window()
+        return front[0] if front else ""
     asn = _run(["lsappinfo", "front"])
     if not asn:
         return ""
@@ -46,7 +53,33 @@ def frontmost_app():
     return raw.rsplit("=", 1)[-1].strip().strip('"')
 
 
+def battery_state(percent, status):
+    """What is worth saying about a Linux battery, or "" if nothing."""
+    if status == "Charging":
+        return "on charge" if percent < 95 else ""
+    if status != "Discharging":
+        return ""
+    if percent <= 15:
+        return f"on battery, down to {percent}% and not charging"
+    if percent <= 35:
+        return f"on battery, {percent}% left"
+    return ""
+
+
+def _linux_battery():
+    for supply in sorted(POWER_SUPPLY.glob("BAT*")):
+        try:
+            percent = int((supply / "capacity").read_text())
+            status = (supply / "status").read_text().strip()
+        except (OSError, ValueError):
+            continue
+        return battery_state(percent, status)
+    return ""
+
+
 def battery():
+    if sys.platform != "darwin":
+        return _linux_battery()
     raw = _run(["pmset", "-g", "batt"])
     if not raw:
         return ""

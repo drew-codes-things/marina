@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 
 import yaml
@@ -25,6 +26,9 @@ def _env_path(name):
 
 REPO_ROOT = _env_path("MARINA_ROOT") or Path(__file__).resolve().parents[2]
 DATA_ROOT = _env_path("MARINA_DATA") or REPO_ROOT
+
+HOST_NAME = "Mac" if sys.platform == "darwin" else "computer"
+SETUP_SCRIPT = "setup-mac.sh" if sys.platform == "darwin" else "setup-linux.sh"
 
 CONFIG_PATH = DATA_ROOT / "character_config.yaml"
 DEFAULT_CONFIG = REPO_ROOT / "character_config.example.yaml"
