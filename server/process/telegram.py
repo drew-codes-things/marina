@@ -264,14 +264,68 @@ def _words(text):
     return re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))
 
 
-def _recent_replies():
+def _recent(role, n):
     try:
         history = load_history()
     except Exception:
         return []
     return [m["content"] for m in history
-            if m.get("role") == "assistant" and isinstance(m.get("content"), str)
-            ][-RECENT_REPLIES:]
+            if m.get("role") == role and isinstance(m.get("content"), str)][-n:]
+
+
+def _recent_replies():
+    return _recent("assistant", RECENT_REPLIES)
+
+
+# The day and time. She has the clock on every message and kept telling
+# them it was Tuesday; fine when they bring it up, not otherwise.
+_WEEKDAY = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_MONTH = (r"january|february|march|april|may|june|july|august|september|october"
+          r"|november|december")
+_SAYS_WHEN = re.compile(
+    rf"\b(?:{_WEEKDAY})s?\b|\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:{_MONTH})\b"
+    rf"|\b(?:{_MONTH})\s+\d{{1,2}}\b|\b\d{{1,2}}:\d{{2}}\b|\b\d{{1,2}}\s?(?:am|pm)\b"
+    r"|\bwhat (?:day|time) it is\b", re.I)
+_ASKS_WHEN = re.compile(
+    rf"\b(?:{_WEEKDAY}|{_MONTH}|day|date|time|today|tonight|tomorrow|yesterday|week"
+    r"|weekend|morning|afternoon|evening|night|clock|hour|when|late|early)\b", re.I)
+
+
+def _mentions_when(reply, user_text):
+    """The day, date or time she brought up without them asking."""
+    if user_text and _ASKS_WHEN.search(user_text):
+        return None
+    m = _SAYS_WHEN.search(reply or "")
+    return m.group(0) if m else None
+
+
+# A topic she won't let go of: a word in this text and in most of her
+# recent ones that they've stopped mentioning. Common words never count.
+_COMMON = set("""
+about above after again against almost already also always another anyone anything
+around because before being below between could doing during either enough every
+everything first going gonna gotta great guess having honestly later little maybe
+might never nothing other really right should since something still sure thing
+things think though through today together tonight trying until using wanna where
+which while would yeah yours actually basically literally probably definitely
+pretty kinda sorta stuff looks looking feels feeling getting making taking
+morning afternoon evening night totally ok okay sounds running check
+checking setup start started working work done ready happy hope nice
+""".split())
+
+
+def _stuck_topics(reply, recent, their_recent):
+    mine = [set(_words(t)) for t in recent[-3:]]
+    if len(mine) < 2:
+        return []
+    theirs = set().union(*(set(_words(t)) for t in their_recent)) if their_recent else set()
+    out = []
+    for word in sorted(set(_words(reply))):
+        if len(word) < 5 or word in _COMMON or word in theirs or "'" in word:
+            continue
+        if sum(word in earlier for earlier in mine) >= 2:
+            out.append(word)
+    return out
 
 
 def _repeats(reply, recent):
@@ -300,21 +354,58 @@ def _repeats(reply, recent):
     return unique
 
 
+AGAIN_WHEN = """
+
+(Note from the app, not from them. Never mention it. You brought up {when}
+without them asking. Don't mention the day, date or time this time.)"""
+
+AGAIN_TOPIC = """
+
+(Note from the app, not from them. Never mention it. You keep coming back to
+{topics}, which they've moved on from. Leave it out this time and answer
+what they actually said.)"""
+
+
+def _problems(reply, user_text, recent, their_recent):
+    """What's wrong with a draft text: phrases she keeps reusing, the day
+    or time unprompted, and a topic she won't drop."""
+    return {"worn": _repeats(reply, recent),
+            "when": _mentions_when(reply, user_text),
+            "topics": _stuck_topics(reply, recent, their_recent)}
+
+
+def _count(problems):
+    return len(problems["worn"]) + bool(problems["when"]) + len(problems["topics"])
+
+
 def _compose(user_text, extra):
-    """Her reply, written once more if it repeats what she has been saying.
-    A small model falls into a groove: the same text to two different
-    messages, or one line in everything. Asking again with the repeat named
-    gets her out of it without changing how she talks."""
+    """Her reply, written once more if it falls into one of her grooves.
+    A small model repeats itself: the same text to two different messages,
+    one line in everything, the day of the week in every text, a topic it
+    won't let go. Asking again with the problem named gets her out of it
+    without changing how she talks."""
     recent = _recent_replies()
+    their_recent = _recent("user", 2) + ([user_text] if user_text else [])
     reply, used_tools = _generate(user_text, extra)
-    worn = _repeats(reply, recent)
+    found = _problems(reply, user_text, recent, their_recent)
     # Asking again would run her tools twice, so a reply that did things stands.
-    if not worn or used_tools:
+    if not _count(found) or used_tools:
         return reply
-    print(f"[telegram] she repeated herself ({'; '.join(worn)}), asking again", flush=True)
-    note = AGAIN.format(phrases="; ".join(f'"{p}"' for p in worn))
-    retry, _ = _generate(user_text, extra, note)
-    if not retry or len(_repeats(retry, recent)) > len(worn):
+    notes = []
+    if found["worn"]:
+        print(f"[telegram] she repeated herself ({'; '.join(found['worn'])}), asking again",
+              flush=True)
+        notes.append(AGAIN.format(phrases="; ".join(f'"{p}"' for p in found["worn"])))
+    if found["when"]:
+        print(f"[telegram] she brought up the time unasked ({found['when']}), asking again",
+              flush=True)
+        notes.append(AGAIN_WHEN.format(when=f'"{found["when"]}"'))
+    if found["topics"]:
+        print(f"[telegram] she won't let go of {', '.join(found['topics'])}, asking again",
+              flush=True)
+        notes.append(AGAIN_TOPIC.format(topics=", ".join(f'"{t}"' for t in found["topics"])))
+    retry, _ = _generate(user_text, extra, "".join(notes))
+    if not retry or _count(_problems(retry, user_text, recent, their_recent)) >= _count(found):
         return reply
     return retry
 

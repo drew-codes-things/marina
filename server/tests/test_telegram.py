@@ -106,3 +106,36 @@ def test_only_the_answer_after_tool_use_is_texted(monkeypatch):
         ["let me check what's going on, give me a sec", "", "ok disk is at 40%, all good"]))
     reply, used = telegram._generate("check your disk", "")
     assert used and reply == "ok disk is at 40%, all good"
+
+
+def test_day_and_time_only_when_they_bring_it_up():
+    assert telegram._mentions_when("ugh fine. tuesday afternoon and we're dodging it",
+                                   "how about we talk about something else") == "tuesday"
+    assert telegram._mentions_when("morning! it's tuesday already", "Morning") is None
+    assert telegram._mentions_when("what's up", "hey") is None
+
+
+def test_a_topic_they_have_moved_on_from_is_caught():
+    mine = ["kubernetes?? who asked for that", "classic kubernetes plotting your demise",
+            "we're dodging kubernetes trauma"]
+    moved_on = ["how about we talk about something else", "I got it, don't worry"]
+    assert telegram._stuck_topics("kubernetes isn't a personality trait", mine, moved_on) == [
+        "kubernetes"]
+    # Still their subject, so still fine to talk about.
+    assert telegram._stuck_topics("kubernetes again lol", mine, ["kubernetes broke again"]) == []
+
+
+def test_a_draft_with_problems_is_written_again(monkeypatch):
+    drafts = iter(["ugh tuesday again, kubernetes is plotting", "fair, what else is new with you"])
+    notes = []
+
+    def fake(user_text, extra, note=""):
+        notes.append(note)
+        return next(drafts), False
+
+    monkeypatch.setattr(telegram, "_generate", fake)
+    monkeypatch.setattr(telegram, "_recent", lambda role, n: (
+        ["kubernetes?? who asked", "classic kubernetes", "dodging kubernetes"]
+        if role == "assistant" else ["talk about something else"]))
+    assert telegram._compose("anyway", "") == "fair, what else is new with you"
+    assert "tuesday" in notes[1] and "kubernetes" in notes[1]
